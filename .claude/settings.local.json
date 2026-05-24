@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:mastra.ai)",
+      "WebFetch(domain:github.com)",
+      "Bash(openspec new *)",
+      "Bash(openspec status *)",
+      "Bash(openspec instructions *)",
+      "Bash(command -v gradle)",
+      "Bash(gradle --version)",
+      "Bash(command -v java)",
+      "Bash(java -version)",
+      "Bash(gradle wrapper *)",
+      "Bash(./gradlew :flowpipe-core:compileJava)",
+      "Bash(./gradlew :flowpipe-core:test)",
+      "Bash(./gradlew test *)",
+      "Bash(./gradlew :flowpipe-core:test --rerun-tasks)",
+      "Bash(./gradlew clean *)",
+      "Bash(openspec list *)",
+      "Bash(openspec --help)",
+      "Bash(openspec change *)",
+      "Bash(openspec spec *)",
+      "Bash(openspec validate *)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(openspec archive *)",
+      "Bash(./gradlew :flowpipe-core:compileTestJava)",
+      "Bash(./gradlew build *)",
+      "Bash(./gradlew :flowpipe-core:compileJava :flowpipe-test:compileJava)",
+      "Bash(git init *)",
+      "Bash(git config *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
+    ]
+  }
+}
