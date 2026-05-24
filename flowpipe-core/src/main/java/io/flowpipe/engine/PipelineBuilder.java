@@ -214,6 +214,29 @@ public final class PipelineBuilder<I, O> {
         return new PipelineBuilder<>(inputType, ifTrue.outputType(), nodes, metricsRecorder, executor, castLifecycle(lifecycle));
     }
 
+    public <E, R> PipelineBuilder<I, List<R>> foreach(Step<E, R> step) {
+        return foreach(step, 1);
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public <E, R> PipelineBuilder<I, List<R>> foreach(Step<E, R> step, int concurrency) {
+        ensureUsable();
+        Objects.requireNonNull(step, "step");
+        if (!currentOutputType.equals(List.class)) {
+            throw new PipelineBuildException(
+                "foreach requires the current pipeline output to be List, but was "
+                    + currentOutputType.getName());
+        }
+        if (concurrency < 1) {
+            throw new PipelineBuildException(
+                "foreach concurrency must be >= 1, but was " + concurrency);
+        }
+        nodes.add(new ForeachNode<>(step, concurrency));
+        consumed = true;
+        return new PipelineBuilder<>(inputType, (Class<List<R>>) (Class) List.class, nodes, metricsRecorder, executor,
+            castLifecycle(lifecycle));
+    }
+
     public PipelineBuilder<I, O> withMetrics(MetricsRecorder recorder) {
         ensureUsable();
         Objects.requireNonNull(recorder, "recorder");
@@ -299,6 +322,11 @@ public final class PipelineBuilder<I, O> {
             }
         } else if (node instanceof BranchNode<?, ?> bn) {
             String id = bn.branchId();
+            if (!seenIds.add(id)) {
+                duplicates.add(id);
+            }
+        } else if (node instanceof ForeachNode<?, ?> fn) {
+            String id = fn.step().describe().id();
             if (!seenIds.add(id)) {
                 duplicates.add(id);
             }

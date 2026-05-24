@@ -11,7 +11,8 @@ public record StepDescriptor<I, O>(
     Class<O> outputType,
     Validator<I> inputValidator,
     Validator<O> outputValidator,
-    RetryPolicy retryPolicy
+    RetryPolicy retryPolicy,
+    TimeoutPolicy timeoutPolicy
 ) {
 
     public StepDescriptor {
@@ -21,6 +22,7 @@ public record StepDescriptor<I, O>(
         Objects.requireNonNull(inputValidator, "inputValidator");
         Objects.requireNonNull(outputValidator, "outputValidator");
         Objects.requireNonNull(retryPolicy, "retryPolicy");
+        Objects.requireNonNull(timeoutPolicy, "timeoutPolicy");
         if (id.isEmpty()) {
             throw new IllegalArgumentException("StepDescriptor id must not be empty");
         }
@@ -28,7 +30,12 @@ public record StepDescriptor<I, O>(
 
     public StepDescriptor<I, O> withRetry(RetryPolicy policy) {
         Objects.requireNonNull(policy, "policy");
-        return new StepDescriptor<>(id, inputType, outputType, inputValidator, outputValidator, policy);
+        return new StepDescriptor<>(id, inputType, outputType, inputValidator, outputValidator, policy, timeoutPolicy);
+    }
+
+    public StepDescriptor<I, O> withTimeout(TimeoutPolicy policy) {
+        Objects.requireNonNull(policy, "policy");
+        return new StepDescriptor<>(id, inputType, outputType, inputValidator, outputValidator, retryPolicy, policy);
     }
 
     public static <I, O> Builder<I, O> builder(String id, Class<I> inputType, Class<O> outputType) {
@@ -42,6 +49,7 @@ public record StepDescriptor<I, O>(
         private Validator<I> inputValidator = NoOpValidator.instance();
         private Validator<O> outputValidator = NoOpValidator.instance();
         private RetryPolicy retryPolicy = RetryPolicy.none();
+        private TimeoutPolicy timeoutPolicy = TimeoutPolicy.none();
 
         private Builder(String id, Class<I> inputType, Class<O> outputType) {
             this.id = id;
@@ -64,8 +72,13 @@ public record StepDescriptor<I, O>(
             return this;
         }
 
+        public Builder<I, O> withTimeout(TimeoutPolicy policy) {
+            this.timeoutPolicy = Objects.requireNonNull(policy, "policy");
+            return this;
+        }
+
         public StepDescriptor<I, O> build() {
-            return new StepDescriptor<>(id, inputType, outputType, inputValidator, outputValidator, retryPolicy);
+            return new StepDescriptor<>(id, inputType, outputType, inputValidator, outputValidator, retryPolicy, timeoutPolicy);
         }
     }
 }

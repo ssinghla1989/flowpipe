@@ -6,6 +6,7 @@ import io.flowpipe.api.PipelineLifecycle;
 import io.flowpipe.api.Result;
 import io.flowpipe.api.RetryPolicy;
 import io.flowpipe.api.Step;
+import io.flowpipe.api.StepTimeoutException;
 import io.flowpipe.api.TraceEntry;
 import io.flowpipe.api.Success;
 import io.flowpipe.observability.MetricsRecorder;
@@ -25,6 +26,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 public final class Pipeline<I, O> {
 
@@ -116,46 +118,12 @@ public final class Pipeline<I, O> {
         for (EngineNode<?, ?> node : nodes) {
             if (node instanceof StepNode<?, ?> sn) {
                 String stepId = sn.step().describe().id();
-                RetryPolicy policy = sn.step().describe().retryPolicy();
-                int maxAttempts = policy.maxAttempts();
-                long totalStartNanos = System.nanoTime();
-                Throwable lastThrowable = null;
-                Object output = null;
-                boolean succeeded = false;
-
-                for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-                    emitStart(stepId, attempt, context);
-                    long attemptStartNanos = System.nanoTime();
-                    try {
-                        output = invokeStep(sn.step(), current, ctx);
-                        long totalDurationNanos = System.nanoTime() - totalStartNanos;
-                        traceBuilder.append(new TraceEntry(stepId, totalStartNanos, totalDurationNanos, attempt, false));
-                        emitRecord(recorder, stepId, totalDurationNanos, attempt, StepOutcome.SUCCESS);
-                        emitFinish(stepId, attempt, totalDurationNanos, context);
-                        succeeded = true;
-                        break;
-                    } catch (Throwable t) {
-                        lastThrowable = t;
-                        long attemptDurationNanos = System.nanoTime() - attemptStartNanos;
-                        emitError(stepId, attempt, attemptDurationNanos, context, t);
-                        if (attempt < maxAttempts) {
-                            long delayMs = computeDelay(policy, attempt);
-                            emitRetry(stepId, attempt, maxAttempts, delayMs, context);
-                            final int capturedAttempt = attempt;
-                            safeRecord(stepId, "recordRetryAttempt",
-                                () -> recorder.recordRetryAttempt(stepId, capturedAttempt));
-                            sleepMillis(delayMs);
-                        }
-                    }
+                ItemResult result = executeItemWithRetry(sn.step(), current, stepId, ctx, context, recorder);
+                traceBuilder.append(result.trace());
+                if (result instanceof ItemFailure f) {
+                    return new Failure<>(f.cause(), f.stepId(), traceBuilder.build());
                 }
-
-                if (!succeeded) {
-                    long totalDurationNanos = System.nanoTime() - totalStartNanos;
-                    traceBuilder.append(new TraceEntry(stepId, totalStartNanos, totalDurationNanos, maxAttempts, false));
-                    emitRecord(recorder, stepId, totalDurationNanos, maxAttempts, StepOutcome.FAILURE);
-                    return new Failure<>(lastThrowable, stepId, traceBuilder.build());
-                }
-                current = output;
+                current = ((ItemSuccess) result).value();
             } else if (node instanceof ParallelNode<?, ?> pn) {
                 ParallelOutcome parallelResult = executeParallel(pn, current, ctx, context, recorder, traceBuilder);
                 if (parallelResult instanceof ParallelFailure pf) {
@@ -168,9 +136,63 @@ public final class Pipeline<I, O> {
                     return bf.failure();
                 }
                 current = ((BranchSuccess) branchResult).value();
+            } else if (node instanceof ForeachNode<?, ?> fn) {
+                ForeachOutcome foreachResult = executeForeach(fn, current, ctx, context, recorder, traceBuilder);
+                if (foreachResult instanceof ForeachFailure ff) {
+                    return ff.failure();
+                }
+                current = ((ForeachSuccess) foreachResult).value();
             }
         }
         return new Success<>(current, traceBuilder.build());
+    }
+
+    // Per-item execution result — carries the TraceEntry so callers append to the shared
+    // traceBuilder on the main thread (avoiding ArrayList concurrency issues).
+    private sealed interface ItemResult permits ItemSuccess, ItemFailure {
+        TraceEntry trace();
+    }
+    private record ItemSuccess(Object value, TraceEntry trace) implements ItemResult {}
+    private record ItemFailure(Throwable cause, String stepId, TraceEntry trace) implements ItemResult {}
+
+    @SuppressWarnings("rawtypes")
+    private ItemResult executeItemWithRetry(Step step, Object input, String itemLabel,
+                                            DefaultStepContext ctx, RequestContext context,
+                                            MetricsRecorder recorder) {
+        RetryPolicy policy = step.describe().retryPolicy();
+        int maxAttempts = policy.maxAttempts();
+        long totalStartNanos = System.nanoTime();
+        Throwable lastThrowable = null;
+
+        long timeoutMs = step.describe().timeoutPolicy().timeoutMs();
+
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            emitStart(itemLabel, attempt, context);
+            long attemptStartNanos = System.nanoTime();
+            try {
+                Object output = invokeStepWithTimeout(step, input, ctx, itemLabel, timeoutMs);
+                long totalDurationNanos = System.nanoTime() - totalStartNanos;
+                emitRecord(recorder, itemLabel, totalDurationNanos, attempt, StepOutcome.SUCCESS);
+                emitFinish(itemLabel, attempt, totalDurationNanos, context);
+                return new ItemSuccess(output, new TraceEntry(itemLabel, totalStartNanos, totalDurationNanos, attempt, false));
+            } catch (Throwable t) {
+                lastThrowable = t;
+                long attemptDurationNanos = System.nanoTime() - attemptStartNanos;
+                emitError(itemLabel, attempt, attemptDurationNanos, context, t);
+                if (attempt < maxAttempts) {
+                    long delayMs = computeDelay(policy, attempt);
+                    emitRetry(itemLabel, attempt, maxAttempts, delayMs, context);
+                    final int capturedAttempt = attempt;
+                    safeRecord(itemLabel, "recordRetryAttempt",
+                        () -> recorder.recordRetryAttempt(itemLabel, capturedAttempt));
+                    sleepMillis(delayMs);
+                }
+            }
+        }
+
+        long totalDurationNanos = System.nanoTime() - totalStartNanos;
+        emitRecord(recorder, itemLabel, totalDurationNanos, maxAttempts, StepOutcome.FAILURE);
+        return new ItemFailure(lastThrowable, itemLabel, new TraceEntry(itemLabel, totalStartNanos, totalDurationNanos, maxAttempts, false));
     }
 
     private sealed interface ParallelOutcome permits ParallelSuccess, ParallelFailure {}
@@ -180,6 +202,10 @@ public final class Pipeline<I, O> {
     private sealed interface BranchOutcome permits BranchSuccess, BranchFailure {}
     private record BranchSuccess(Object value) implements BranchOutcome {}
     private record BranchFailure(Failure<Object> failure) implements BranchOutcome {}
+
+    private sealed interface ForeachOutcome permits ForeachSuccess, ForeachFailure {}
+    private record ForeachSuccess(Object value) implements ForeachOutcome {}
+    private record ForeachFailure(Failure<Object> failure) implements ForeachOutcome {}
 
     @SuppressWarnings({"unchecked", "rawtypes"})
     private BranchOutcome executeBranch(BranchNode bn, Object input, DefaultStepContext ctx,
@@ -232,6 +258,11 @@ public final class Pipeline<I, O> {
                 emitSkip(bn.branchId(), branchId, context);
                 emitSkipped(bn.ifTrue().nodes, branchId, recorder, traceBuilder, context);
                 emitSkipped(bn.ifFalse().nodes, branchId, recorder, traceBuilder, context);
+            } else if (node instanceof ForeachNode<?, ?> fn) {
+                String stepId = fn.step().describe().id();
+                traceBuilder.append(new TraceEntry(stepId, 0L, 0L, 0, true));
+                emitRecord(recorder, stepId, 0L, 0, StepOutcome.SKIPPED);
+                emitSkip(stepId, branchId, context);
             }
         }
     }
@@ -299,8 +330,70 @@ public final class Pipeline<I, O> {
         return new ParallelSuccess(combined);
     }
 
-    private static void cancelAll(List<Future<BranchResult>> futures) {
-        for (Future<BranchResult> f : futures) {
+    @SuppressWarnings("rawtypes")
+    private ForeachOutcome executeForeach(ForeachNode fn, Object input, DefaultStepContext ctx,
+                                          RequestContext context, MetricsRecorder recorder,
+                                          ExecutionTrace.Builder traceBuilder) {
+        List<?> items = (List<?>) input;
+        String stepId = fn.step().describe().id();
+        int concurrency = fn.concurrency();
+        List<Object> outputs = new ArrayList<>(items.size());
+
+        if (concurrency == 1) {
+            for (int i = 0; i < items.size(); i++) {
+                String itemLabel = stepId + "[" + i + "]";
+                ItemResult result = executeItemWithRetry(fn.step(), items.get(i), itemLabel, ctx, context, recorder);
+                traceBuilder.append(result.trace());
+                if (result instanceof ItemFailure f) {
+                    return new ForeachFailure(new Failure<>(f.cause(), f.stepId(), traceBuilder.build()));
+                }
+                outputs.add(((ItemSuccess) result).value());
+            }
+        } else {
+            for (int windowStart = 0; windowStart < items.size(); windowStart += concurrency) {
+                int windowEnd = Math.min(windowStart + concurrency, items.size());
+                List<Future<ItemResult>> futures = new ArrayList<>(windowEnd - windowStart);
+
+                for (int i = windowStart; i < windowEnd; i++) {
+                    final int index = i;
+                    final String itemLabel = stepId + "[" + index + "]";
+                    try {
+                        futures.add(executor.submit(
+                            () -> executeItemWithRetry(fn.step(), items.get(index), itemLabel, ctx, context, recorder)));
+                    } catch (RejectedExecutionException e) {
+                        cancelAll(futures);
+                        return new ForeachFailure(new Failure<>(e, stepId, traceBuilder.build()));
+                    }
+                }
+
+                for (Future<ItemResult> future : futures) {
+                    ItemResult result;
+                    try {
+                        result = future.get();
+                    } catch (ExecutionException e) {
+                        cancelAll(futures);
+                        return new ForeachFailure(new Failure<>(e.getCause(), stepId, traceBuilder.build()));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        cancelAll(futures);
+                        return new ForeachFailure(new Failure<>(e, stepId, traceBuilder.build()));
+                    }
+
+                    traceBuilder.append(result.trace());
+                    if (result instanceof ItemFailure f) {
+                        cancelAll(futures);
+                        return new ForeachFailure(new Failure<>(f.cause(), f.stepId(), traceBuilder.build()));
+                    }
+                    outputs.add(((ItemSuccess) result).value());
+                }
+            }
+        }
+
+        return new ForeachSuccess(outputs);
+    }
+
+    private static void cancelAll(List<? extends Future<?>> futures) {
+        for (Future<?> f : futures) {
             f.cancel(true);
         }
     }
@@ -311,6 +404,27 @@ public final class Pipeline<I, O> {
         Object output = step.execute(input, ctx);
         step.describe().outputValidator().validate(output);
         return output;
+    }
+
+    @SuppressWarnings("rawtypes")
+    private Object invokeStepWithTimeout(Step step, Object input, DefaultStepContext ctx,
+                                         String stepId, long timeoutMs) throws Throwable {
+        if (timeoutMs <= 0) {
+            return invokeStep(step, input, ctx);
+        }
+        Future<Object> future = executor.submit(() -> invokeStep(step, input, ctx));
+        try {
+            return future.get(timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException te) {
+            future.cancel(true);
+            throw new StepTimeoutException(stepId, timeoutMs);
+        } catch (ExecutionException ee) {
+            Throwable cause = ee.getCause();
+            throw cause != null ? cause : ee;
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw ie;
+        }
     }
 
     private static long computeDelay(RetryPolicy policy, int failedAttempt) {

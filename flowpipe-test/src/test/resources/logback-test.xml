@@ -1,0 +1,17 @@
+<configuration>
+
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %-5level %-40.40logger{39} | %msg %kvp%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- FlowPipe framework logs: step.start / step.finish / step.error / step.retry / pipeline.* -->
+    <logger name="io.flowpipe" level="INFO"/>
+
+    <!-- Suppress everything else -->
+    <root level="WARN">
+        <appender-ref ref="STDOUT"/>
+    </root>
+
+</configuration>

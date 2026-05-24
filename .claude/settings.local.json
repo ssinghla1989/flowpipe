@@ -29,7 +29,13 @@
       "Bash(git init *)",
       "Bash(git config *)",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(./gradlew :flowpipe-test:test --tests \"io.flowpipe.example.*\")",
+      "Bash(./gradlew :flowpipe-test:runDemo)",
+      "Bash(xargs ls -1)",
+      "Bash(./gradlew :flowpipe-core:test --tests \"io.flowpipe.engine.TimeoutPolicyTest\" --tests \"io.flowpipe.engine.StepTimeoutExecutionTest\")",
+      "Bash([ -d \"/Users/ssinghl/flowpipe/$TARGET\" ])",
+      "Bash(mv /Users/ssinghl/flowpipe/openspec/changes/step-execution-timeout /Users/ssinghl/flowpipe/__TRACKED_VAR__)"
     ]
   }
 }
