@@ -35,7 +35,9 @@
       "Bash(xargs ls -1)",
       "Bash(./gradlew :flowpipe-core:test --tests \"io.flowpipe.engine.TimeoutPolicyTest\" --tests \"io.flowpipe.engine.StepTimeoutExecutionTest\")",
       "Bash([ -d \"/Users/ssinghl/flowpipe/$TARGET\" ])",
-      "Bash(mv /Users/ssinghl/flowpipe/openspec/changes/step-execution-timeout /Users/ssinghl/flowpipe/__TRACKED_VAR__)"
+      "Bash(mv /Users/ssinghl/flowpipe/openspec/changes/step-execution-timeout /Users/ssinghl/flowpipe/__TRACKED_VAR__)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(d['instruction']\\); print\\('---TEMPLATE---'\\); print\\(d['template']\\)\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(d['instruction'][:500]\\); print\\('---TEMPLATE---'\\); print\\(d['template']\\)\")"
     ]
   }
 }

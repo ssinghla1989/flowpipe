@@ -13,6 +13,8 @@ All planned features have landed. The current feature set:
 - Conditional branching: `branch(branchId, predicate, ifTrue, ifFalse)` with build-time type checking on arm inputs/outputs
 - Retry with backoff: `RetryPolicy` on `StepDescriptor`, configurable max attempts, initial delay, multiplier, and jitter
 - Lifecycle hooks: `PipelineLifecycle<I, O>` SPI registered via `.withLifecycle(...)` on `PipelineBuilder`; `onStart` / `onFinish` / `onError` callbacks fire at the top-level pipeline boundary only
+- Foreach fan-out: `.foreach(step)` / `.foreach(step, concurrency)` on `PipelineBuilder`; accepts a `List<E>` input and applies the step to each element, collecting `List<R>` output; concurrency > 1 runs elements in windowed parallel batches using the pipeline's executor
+- Per-step execution timeout: `TimeoutPolicy` on `StepDescriptor` via `.withTimeout(...)`; `TimeoutPolicy.ofMillis(ms)` / `TimeoutPolicy.of(duration, unit)`; exceeded deadline surfaces as `Failure` with `StepTimeoutException` as the cause; each retry attempt receives its own independent deadline
 
 ## What FlowPipe is
 
@@ -39,6 +41,7 @@ FlowPipe's design is heavily influenced by Mastra (`packages/core/src/workflows`
 - **Step authors write zero logging code and zero metrics code.** Both are framework concerns, injected around every step. If a feature requires step authors to opt into instrumentation, it's the wrong design.
 - **Input validated before each step, output validated after.** No "trust the previous step" shortcuts.
 - **Retries are configurable but invisible to step authors** — the `execute` method sees one call, the framework handles backoff.
+- **Timeouts are configurable but invisible to step authors** — the `execute` method sees one call per attempt, the framework enforces the deadline and surfaces a `StepTimeoutException` on breach.
 
 ## Explicit non-goals
 
@@ -54,11 +57,11 @@ These should not be implemented and should not creep in via "while we're at it" 
 
 - Gradle (Kotlin DSL) multi-module build, Java 17 toolchain, `-Xlint:all -Werror`.
 - `flowpipe-core` — the library itself. Sole runtime dependency: `slf4j-api`.
-  - `io.flowpipe.api` — public surface: `Step`, `StepDescriptor`, `StepContext`, `Result`, `Success`, `Failure`, `ExecutionTrace`, `TraceEntry`, `TriFunction`, `QuadFunction`.
+  - `io.flowpipe.api` — public surface: `Step`, `StepDescriptor`, `StepContext`, `Result`, `Success`, `Failure`, `ExecutionTrace`, `TraceEntry`, `TriFunction`, `QuadFunction`, `RetryPolicy`, `PipelineLifecycle<I,O>`, `TimeoutPolicy`, `StepTimeoutException`.
   - `io.flowpipe.state` — `State`, `StateKey<T>`, `RequestContext`, `ContextKey<T>`.
   - `io.flowpipe.validation` — `Validator<T>` SPI, `NoOpValidator`, `ValidationException`.
   - `io.flowpipe.observability` — `MetricsRecorder` SPI, `NoOpMetricsRecorder` default, `StepOutcome` enum. Logger plumbing (SLF4J `step.start` / `step.finish` / `step.error` emission) lives inside `io.flowpipe.engine.Pipeline`.
-  - `io.flowpipe.engine` — `Pipeline`, `PipelineBuilder` (`.withMetrics(...)`, `.withExecutor(...)`, `.parallel2/3/4/N(...)`), `PipelineBuildException`, internal `DefaultStepContext`. Internal engine node types `EngineNode`, `StepNode`, and `ParallelNode` are package-private sealed types not visible to callers.
+  - `io.flowpipe.engine` — `Pipeline`, `PipelineBuilder` (`.withMetrics(...)`, `.withExecutor(...)`, `.withLifecycle(...)`, `.parallel2/3/4/N(...)`, `.branch(...)`, `.foreach(...)`), `PipelineBuildException`, internal `DefaultStepContext`. Internal engine node types `EngineNode`, `StepNode`, `ParallelNode`, `BranchNode`, and `ForeachNode` are package-private sealed types not visible to callers.
 - `flowpipe-test` — test utilities (`StepHarness`, `Steps`, `RecordingMetricsRecorder`). Depends on `flowpipe-core` and re-exports JUnit 5 + AssertJ for downstream consumers.
 - Future optional modules (e.g. `flowpipe-spring`, `flowpipe-micrometer`) will live outside core and depend on it, never the reverse.
 

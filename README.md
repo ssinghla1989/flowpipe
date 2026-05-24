@@ -2,8 +2,6 @@
 
 A Java library for orchestrating synchronous API pipelines. Compose typed, reusable steps into pipelines with automatic input/output validation, build-time wiring checks, and zero-boilerplate logging and metrics around every step.
 
-Parallel composition has landed. Branching, retry, and lifecycle hooks are not yet implemented — they will land in subsequent changes.
-
 ## Requirements
 
 - Java 17 or newer
@@ -95,6 +93,90 @@ Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
 ```
 
 **Lambda users**: on a 1-vCPU Lambda the common pool's parallelism is 0, which means branches execute on the calling thread and parallelism is illusory. Supply a `Executors.newCachedThreadPool()` executor (and shut it down after the invocation) to get real concurrency. FlowPipe never shuts down the executor it is given.
+
+## Conditional branching
+
+Route execution down one of two typed sub-pipelines based on a predicate. Both arms must produce the same output type; type mismatches are caught at `build()` time.
+
+```java
+Pipeline<Order, OrderResult> pipeline = PipelineBuilder.start(Order.class)
+    .branch(
+        "check-stock",
+        (order, ctx) -> inventoryService.isInStock(order),
+        PipelineBuilder.start(Order.class).then(processStep).build(),
+        PipelineBuilder.start(Order.class).then(backorderStep).build())
+    .build();
+```
+
+The skipped arm's steps appear in the `ExecutionTrace` as skipped entries.
+
+## Retry with backoff
+
+Attach a `RetryPolicy` to any `StepDescriptor` to make the framework retry that step transparently on failure. Step authors write no retry code.
+
+```java
+StepDescriptor<Order, PaymentResult> desc = StepDescriptor
+    .builder("charge-card", Order.class, PaymentResult.class)
+    .withRetry(RetryPolicy.exponential(3, 100, 2.0, true))
+    .build();
+```
+
+`RetryPolicy.fixed(attempts, delayMs)` gives constant-delay retries; `RetryPolicy.exponential(attempts, initialMs, multiplier, jitter)` doubles the delay between attempts. `RetryPolicy.none()` (the default) means one attempt with no retry.
+
+## Lifecycle hooks
+
+Register an `onStart` / `onFinish` / `onError` listener at the pipeline boundary. Useful for distributed tracing spans, audit logs, and top-level error reporting.
+
+```java
+Pipeline<Order, OrderResult> pipeline = PipelineBuilder.start(Order.class)
+    .then(validateStep)
+    .then(chargeStep)
+    .withLifecycle(new PipelineLifecycle<Order, OrderResult>() {
+        @Override public void onStart(Order input, StepContext ctx) {
+            tracer.startSpan(ctx.context().get(TRACE_ID_KEY));
+        }
+        @Override public void onFinish(Result<OrderResult> result, StepContext ctx) {
+            tracer.finishSpan();
+        }
+        @Override public void onError(Failure<OrderResult> failure, StepContext ctx) {
+            alerts.send(failure.failedStepId(), failure.cause());
+        }
+    })
+    .build();
+```
+
+Hooks fire at the top-level pipeline boundary only; sub-pipelines inside `branch(...)` do not re-fire the parent hooks.
+
+## Foreach fan-out
+
+Apply a step to every element of a `List` input and collect the results. Optionally run elements concurrently in a fixed-size window.
+
+```java
+Step<String, UserProfile> enrichStep = Step.of(
+    "enrich-user", String.class, UserProfile.class,
+    (userId, ctx) -> profileService.fetch(userId));
+
+Pipeline<List<String>, List<UserProfile>> pipeline = PipelineBuilder
+    .start((Class<List<String>>) (Class<?>) List.class)
+    .foreach(enrichStep)          // sequential (concurrency = 1)
+    // .foreach(enrichStep, 8)    // up to 8 concurrent
+    .build();
+```
+
+Sequential foreach preserves order; concurrent foreach processes elements in windows of the given size using the pipeline's executor.
+
+## Per-step timeout
+
+Attach a `TimeoutPolicy` to any `StepDescriptor` to give that step a hard deadline per attempt. A step that exceeds its deadline is interrupted and the pipeline produces a `Failure` whose `cause()` is a `StepTimeoutException`.
+
+```java
+StepDescriptor<String, UserProfile> desc = StepDescriptor
+    .builder("fetch-profile", String.class, UserProfile.class)
+    .withTimeout(TimeoutPolicy.ofMillis(500))
+    .build();
+```
+
+`TimeoutPolicy.of(2, TimeUnit.SECONDS)` is an alternative constructor. When combined with a `RetryPolicy`, each retry attempt gets its own independent deadline. Steps without a `TimeoutPolicy` (the default `TimeoutPolicy.none()`) run without a time bound.
 
 ## Observability
 
