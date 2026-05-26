@@ -263,7 +263,25 @@ public final class PipelineBuilder<I, O> {
         consumed = true;
         validate();
         ExecutorService resolved = (executor != null) ? executor : ForkJoinPool.commonPool();
-        return new Pipeline<>(inputType, currentOutputType, List.copyOf(nodes), metricsRecorder, resolved, lifecycle);
+        var circuitBreakers = buildCircuitBreakers(nodes);
+        return new Pipeline<>(inputType, currentOutputType, List.copyOf(nodes), metricsRecorder,
+            resolved, lifecycle, circuitBreakers);
+    }
+
+    private static java.util.Map<String, dev.failsafe.CircuitBreaker<Object>> buildCircuitBreakers(
+            List<EngineNode<?, ?>> nodes) {
+        var map = new java.util.HashMap<String, dev.failsafe.CircuitBreaker<Object>>();
+        for (EngineNode<?, ?> node : nodes) {
+            if (node instanceof StepNode<?, ?> sn) {
+                var cbp = sn.step().describe().circuitBreakerPolicy();
+                if (cbp != null) {
+                    map.put(sn.step().describe().id(), FailsafePolicies.toFailsafe(cbp));
+                }
+            }
+            // Branch arms and foreach steps are not pre-built here; they inherit from
+            // the arm Pipeline instances which build their own registry at build() time.
+        }
+        return java.util.Collections.unmodifiableMap(map);
     }
 
     @SuppressWarnings("unchecked")

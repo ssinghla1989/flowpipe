@@ -1,5 +1,10 @@
 package io.flowpipe.engine;
 
+import dev.failsafe.Failsafe;
+import dev.failsafe.FailsafeException;
+import dev.failsafe.Policy;
+import dev.failsafe.TimeoutExceededException;
+import io.flowpipe.api.CircuitBreakerOpenException;
 import io.flowpipe.api.ExecutionTrace;
 import io.flowpipe.api.Failure;
 import io.flowpipe.api.PipelineLifecycle;
@@ -17,8 +22,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.spi.LoggingEventBuilder;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
@@ -26,7 +33,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class Pipeline<I, O> {
 
@@ -38,19 +45,22 @@ public final class Pipeline<I, O> {
     private final MetricsRecorder defaultRecorder;
     private final ExecutorService executor;
     private final PipelineLifecycle<I, O> lifecycle;
+    private final Map<String, dev.failsafe.CircuitBreaker<Object>> circuitBreakers;
 
     Pipeline(Class<I> inputType,
              Class<O> outputType,
              List<EngineNode<?, ?>> nodes,
              MetricsRecorder defaultRecorder,
              ExecutorService executor,
-             PipelineLifecycle<I, O> lifecycle) {
+             PipelineLifecycle<I, O> lifecycle,
+             Map<String, dev.failsafe.CircuitBreaker<Object>> circuitBreakers) {
         this.inputType = inputType;
         this.outputType = outputType;
         this.nodes = nodes;
         this.defaultRecorder = defaultRecorder;
         this.executor = executor;
         this.lifecycle = lifecycle;
+        this.circuitBreakers = circuitBreakers;
     }
 
     public Class<I> inputType() {
@@ -155,44 +165,103 @@ public final class Pipeline<I, O> {
     private record ItemSuccess(Object value, TraceEntry trace) implements ItemResult {}
     private record ItemFailure(Throwable cause, String stepId, TraceEntry trace) implements ItemResult {}
 
-    @SuppressWarnings("rawtypes")
+    @SuppressWarnings({"rawtypes", "unchecked"})
     private ItemResult executeItemWithRetry(Step step, Object input, String itemLabel,
-                                            DefaultStepContext ctx, RequestContext context,
+                                            DefaultStepContext stepCtx, RequestContext context,
                                             MetricsRecorder recorder) {
-        RetryPolicy policy = step.describe().retryPolicy();
-        int maxAttempts = policy.maxAttempts();
-        long totalStartNanos = System.nanoTime();
-        Throwable lastThrowable = null;
+        RetryPolicy fpRetry = step.describe().retryPolicy();
+        io.flowpipe.api.TimeoutPolicy fpTimeout = step.describe().timeoutPolicy();
+        int maxAttempts = fpRetry.maxAttempts();
+        long timeoutMs = fpTimeout.timeoutMs();
 
-        long timeoutMs = step.describe().timeoutPolicy().timeoutMs();
+        // Build Failsafe policy chain in outer-to-inner order:
+        // [circuitBreaker (optional)] → [retryPolicy (if maxAttempts > 1)] → [timeout (if set)]
+        List<Policy<Object>> policies = new ArrayList<>();
 
-        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-            emitStart(itemLabel, attempt, context);
-            long attemptStartNanos = System.nanoTime();
-            try {
-                Object output = invokeStepWithTimeout(step, input, ctx, itemLabel, timeoutMs);
-                long totalDurationNanos = System.nanoTime() - totalStartNanos;
-                emitRecord(recorder, itemLabel, totalDurationNanos, attempt, StepOutcome.SUCCESS);
-                emitFinish(itemLabel, attempt, totalDurationNanos, context);
-                return new ItemSuccess(output, new TraceEntry(itemLabel, totalStartNanos, totalDurationNanos, attempt, false));
-            } catch (Throwable t) {
-                lastThrowable = t;
-                long attemptDurationNanos = System.nanoTime() - attemptStartNanos;
-                emitError(itemLabel, attempt, attemptDurationNanos, context, t);
-                if (attempt < maxAttempts) {
-                    long delayMs = computeDelay(policy, attempt);
-                    emitRetry(itemLabel, attempt, maxAttempts, delayMs, context);
-                    final int capturedAttempt = attempt;
-                    safeRecord(itemLabel, "recordRetryAttempt",
-                        () -> recorder.recordRetryAttempt(itemLabel, capturedAttempt));
-                    sleepMillis(delayMs);
+        dev.failsafe.CircuitBreaker<Object> fsCb = circuitBreakers.get(step.describe().id());
+        if (fsCb != null) policies.add(fsCb);
+
+        if (maxAttempts > 1) {
+            var retryBuilder = FailsafePolicies.toFailsafe(fpRetry);
+            retryBuilder.onFailedAttempt(event -> {
+                int attempt = event.getAttemptCount();  // already 1-indexed in event listeners
+                long durationNanos = event.getElapsedAttemptTime().toNanos();
+                Throwable t = event.getLastException();
+                if (t instanceof TimeoutExceededException) {
+                    t = new StepTimeoutException(itemLabel, timeoutMs);
+                } else if (t instanceof FailsafeException fe && fe.getCause() != null) {
+                    t = fe.getCause();
                 }
-            }
+                emitError(itemLabel, attempt, durationNanos, context, t);
+            });
+            retryBuilder.onRetryScheduled(event -> {
+                int attempt = event.getAttemptCount();  // already 1-indexed in event listeners
+                long delayMs = event.getDelay().toMillis();
+                emitRetry(itemLabel, attempt, maxAttempts, delayMs, context);
+                safeRecord(itemLabel, "recordRetryAttempt",
+                    () -> recorder.recordRetryAttempt(itemLabel, attempt));
+            });
+            policies.add(retryBuilder.build());
         }
 
-        long totalDurationNanos = System.nanoTime() - totalStartNanos;
-        emitRecord(recorder, itemLabel, totalDurationNanos, maxAttempts, StepOutcome.FAILURE);
-        return new ItemFailure(lastThrowable, itemLabel, new TraceEntry(itemLabel, totalStartNanos, totalDurationNanos, maxAttempts, false));
+        if (timeoutMs > 0) policies.add(FailsafePolicies.toFailsafe(fpTimeout));
+
+        long totalStartNanos = System.nanoTime();
+        AtomicInteger lastAttempt = new AtomicInteger(1);
+
+        try {
+            Object output;
+            if (policies.isEmpty()) {
+                // Fast path: no resilience policies — call directly without Failsafe overhead
+                emitStart(itemLabel, 1, context);
+                output = invokeStep(step, input, stepCtx);
+            } else {
+                output = Failsafe.with(policies).get((dev.failsafe.ExecutionContext<Object> ctx) -> {
+                    int attempt = ctx.getAttemptCount() + 1;  // Failsafe is 0-indexed
+                    lastAttempt.set(attempt);
+                    emitStart(itemLabel, attempt, context);
+                    return invokeStep(step, input, stepCtx);
+                });
+            }
+
+            int attempt = lastAttempt.get();
+            long totalDurationNanos = System.nanoTime() - totalStartNanos;
+            emitRecord(recorder, itemLabel, totalDurationNanos, attempt, StepOutcome.SUCCESS);
+            emitFinish(itemLabel, attempt, totalDurationNanos, context);
+            return new ItemSuccess(output, new TraceEntry(itemLabel, totalStartNanos, totalDurationNanos, attempt, false));
+
+        } catch (dev.failsafe.CircuitBreakerOpenException cboe) {
+            long durationNanos = System.nanoTime() - totalStartNanos;
+            Instant retriableAfter = Instant.now().plus(cboe.getCircuitBreaker().getRemainingDelay());
+            CircuitBreakerOpenException fpEx = new CircuitBreakerOpenException(itemLabel, retriableAfter);
+            emitCircuitOpen(itemLabel, retriableAfter, context);
+            emitRecord(recorder, itemLabel, durationNanos, 1, StepOutcome.FAILURE);
+            return new ItemFailure(fpEx, itemLabel,
+                new TraceEntry(itemLabel, totalStartNanos, durationNanos, 1, false));
+
+        } catch (TimeoutExceededException tee) {
+            // Thrown when no retry is configured, or when all retry attempts timed out.
+            // When maxAttempts > 1, onFailedAttempt already emitted step.error per attempt.
+            long durationNanos = System.nanoTime() - totalStartNanos;
+            int attempt = lastAttempt.get();
+            StepTimeoutException ste = new StepTimeoutException(itemLabel, timeoutMs);
+            if (maxAttempts <= 1) emitError(itemLabel, attempt, durationNanos, context, ste);
+            emitRecord(recorder, itemLabel, durationNanos, attempt, StepOutcome.FAILURE);
+            return new ItemFailure(ste, itemLabel,
+                new TraceEntry(itemLabel, totalStartNanos, durationNanos, attempt, false));
+
+        } catch (Throwable t) {
+            // Unwrap Failsafe wrapper if present so the original exception surfaces in Failure.cause().
+            Throwable cause = (t instanceof FailsafeException fe && fe.getCause() != null)
+                ? fe.getCause() : t;
+            long durationNanos = System.nanoTime() - totalStartNanos;
+            int attempt = lastAttempt.get();
+            // When maxAttempts > 1, onFailedAttempt already emitted step.error for every attempt.
+            if (maxAttempts <= 1) emitError(itemLabel, attempt, durationNanos, context, cause);
+            emitRecord(recorder, itemLabel, durationNanos, attempt, StepOutcome.FAILURE);
+            return new ItemFailure(cause, itemLabel,
+                new TraceEntry(itemLabel, totalStartNanos, durationNanos, attempt, false));
+        }
     }
 
     private sealed interface ParallelOutcome permits ParallelSuccess, ParallelFailure {}
@@ -406,44 +475,6 @@ public final class Pipeline<I, O> {
         return output;
     }
 
-    @SuppressWarnings("rawtypes")
-    private Object invokeStepWithTimeout(Step step, Object input, DefaultStepContext ctx,
-                                         String stepId, long timeoutMs) throws Throwable {
-        if (timeoutMs <= 0) {
-            return invokeStep(step, input, ctx);
-        }
-        Future<Object> future = executor.submit(() -> invokeStep(step, input, ctx));
-        try {
-            return future.get(timeoutMs, TimeUnit.MILLISECONDS);
-        } catch (TimeoutException te) {
-            future.cancel(true);
-            throw new StepTimeoutException(stepId, timeoutMs);
-        } catch (ExecutionException ee) {
-            Throwable cause = ee.getCause();
-            throw cause != null ? cause : ee;
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            throw ie;
-        }
-    }
-
-    private static long computeDelay(RetryPolicy policy, int failedAttempt) {
-        long base = (long) Math.floor(policy.initialDelayMs() * Math.pow(policy.multiplier(), failedAttempt - 1));
-        if (policy.jitter() && base > 0) {
-            base = (long) (Math.random() * base);
-        }
-        return base;
-    }
-
-    private static void sleepMillis(long ms) {
-        if (ms <= 0) return;
-        try {
-            Thread.sleep(ms);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
-
     private static void emitRetry(String stepId, int attempt, int maxAttempts, long delayMs,
                                   RequestContext context) {
         LoggingEventBuilder event = LOG.atWarn()
@@ -486,6 +517,15 @@ public final class Pipeline<I, O> {
             .addKeyValue("step.outcome", "failure")
             .addKeyValue("step.error_class", cause.getClass().getName())
             .addKeyValue("step.error_message", cause.getMessage() == null ? "" : cause.getMessage());
+        addContextFields(event, context);
+        event.log();
+    }
+
+    private static void emitCircuitOpen(String stepId, Instant retriableAfter, RequestContext context) {
+        LoggingEventBuilder event = LOG.atWarn()
+            .setMessage("step.circuit_open")
+            .addKeyValue("step.id", stepId)
+            .addKeyValue("step.retriable_after", retriableAfter.toString());
         addContextFields(event, context);
         event.log();
     }

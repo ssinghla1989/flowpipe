@@ -178,6 +178,24 @@ StepDescriptor<String, UserProfile> desc = StepDescriptor
 
 `TimeoutPolicy.of(2, TimeUnit.SECONDS)` is an alternative constructor. When combined with a `RetryPolicy`, each retry attempt gets its own independent deadline. Steps without a `TimeoutPolicy` (the default `TimeoutPolicy.none()`) run without a time bound.
 
+## Circuit breaker
+
+Attach a `CircuitBreakerPolicy` to any `StepDescriptor` to prevent cascading failures when a downstream dependency is unhealthy. The circuit transitions through CLOSED → OPEN → HALF-OPEN states automatically.
+
+```java
+StepDescriptor<String, UserProfile> desc = StepDescriptor
+    .builder("fetch-profile", String.class, UserProfile.class)
+    .withCircuitBreaker(CircuitBreakerPolicy.of(
+        50,      // open when ≥ 50 % of calls fail
+        5,       // minimum calls before the rate is evaluated
+        10,      // sliding window size
+        30_000L, // stay open for 30 s
+        2))      // allow 2 probe calls in HALF-OPEN before closing
+    .build();
+```
+
+`CircuitBreakerPolicy.defaults()` gives reasonable out-of-the-box settings (50 % threshold, 5 minimum calls, window of 10, 60 s open window, 2 half-open probes). When the circuit is OPEN, the step fast-fails with a `Failure` whose `cause()` is a `CircuitBreakerOpenException` — no call is made to the step's `execute` method. Circuit state is per-`Pipeline` instance, keyed by step id, and persists across `pipeline.execute(...)` calls. When combined with `RetryPolicy`, the circuit evaluates the final outcome of the retry loop, not individual attempt outcomes.
+
 ## Observability
 
 Every step invocation emits three structured SLF4J events — `step.start`, then either `step.finish` (success) or `step.error` (failure) — carrying `step.id`, `step.attempt`, `step.duration_ms`, `step.outcome`, error class/message on failure, and every `RequestContext` entry as a structured key-value field. Configure your SLF4J backend the usual way; no library configuration required.

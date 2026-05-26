@@ -15,6 +15,7 @@ All planned features have landed. The current feature set:
 - Lifecycle hooks: `PipelineLifecycle<I, O>` SPI registered via `.withLifecycle(...)` on `PipelineBuilder`; `onStart` / `onFinish` / `onError` callbacks fire at the top-level pipeline boundary only
 - Foreach fan-out: `.foreach(step)` / `.foreach(step, concurrency)` on `PipelineBuilder`; accepts a `List<E>` input and applies the step to each element, collecting `List<R>` output; concurrency > 1 runs elements in windowed parallel batches using the pipeline's executor
 - Per-step execution timeout: `TimeoutPolicy` on `StepDescriptor` via `.withTimeout(...)`; `TimeoutPolicy.ofMillis(ms)` / `TimeoutPolicy.of(duration, unit)`; exceeded deadline surfaces as `Failure` with `StepTimeoutException` as the cause; each retry attempt receives its own independent deadline
+- Circuit breaker policy: `CircuitBreakerPolicy` on `StepDescriptor` via `.withCircuitBreaker(...)`; CLOSED/OPEN/HALF-OPEN state machine with configurable failure-rate threshold, sliding window, open window, and half-open probe count; OPEN circuit fast-fails with `CircuitBreakerOpenException` before retry or timeout logic runs; state is per-`Pipeline`-instance, keyed by step id, persists across executions; circuit records the final retry-loop outcome (not individual attempt outcomes)
 
 ## What FlowPipe is
 
@@ -56,12 +57,12 @@ These should not be implemented and should not creep in via "while we're at it" 
 ## Module and package layout (current)
 
 - Gradle (Kotlin DSL) multi-module build, Java 17 toolchain, `-Xlint:all -Werror`.
-- `flowpipe-core` — the library itself. Sole runtime dependency: `slf4j-api`.
-  - `io.flowpipe.api` — public surface: `Step`, `StepDescriptor`, `StepContext`, `Result`, `Success`, `Failure`, `ExecutionTrace`, `TraceEntry`, `TriFunction`, `QuadFunction`, `RetryPolicy`, `PipelineLifecycle<I,O>`, `TimeoutPolicy`, `StepTimeoutException`.
+- `flowpipe-core` — the library itself. Runtime dependencies: `slf4j-api`, `dev.failsafe:failsafe:3.3.2` (resilience engine — retry, timeout, circuit breaker; kept as a private engine detail, never exposed in the public API).
+  - `io.flowpipe.api` — public surface: `Step`, `StepDescriptor`, `StepContext`, `Result`, `Success`, `Failure`, `ExecutionTrace`, `TraceEntry`, `TriFunction`, `QuadFunction`, `RetryPolicy`, `PipelineLifecycle<I,O>`, `TimeoutPolicy`, `StepTimeoutException`, `CircuitBreakerPolicy`, `CircuitBreakerOpenException`.
   - `io.flowpipe.state` — `State`, `StateKey<T>`, `RequestContext`, `ContextKey<T>`.
   - `io.flowpipe.validation` — `Validator<T>` SPI, `NoOpValidator`, `ValidationException`.
-  - `io.flowpipe.observability` — `MetricsRecorder` SPI, `NoOpMetricsRecorder` default, `StepOutcome` enum. Logger plumbing (SLF4J `step.start` / `step.finish` / `step.error` emission) lives inside `io.flowpipe.engine.Pipeline`.
-  - `io.flowpipe.engine` — `Pipeline`, `PipelineBuilder` (`.withMetrics(...)`, `.withExecutor(...)`, `.withLifecycle(...)`, `.parallel2/3/4/N(...)`, `.branch(...)`, `.foreach(...)`), `PipelineBuildException`, internal `DefaultStepContext`. Internal engine node types `EngineNode`, `StepNode`, `ParallelNode`, `BranchNode`, and `ForeachNode` are package-private sealed types not visible to callers.
+  - `io.flowpipe.observability` — `MetricsRecorder` SPI, `NoOpMetricsRecorder` default, `StepOutcome` enum. Logger plumbing (SLF4J `step.start` / `step.finish` / `step.error` / `step.retry` / `step.circuit_open` emission) lives inside `io.flowpipe.engine.Pipeline`.
+  - `io.flowpipe.engine` — `Pipeline`, `PipelineBuilder` (`.withMetrics(...)`, `.withExecutor(...)`, `.withLifecycle(...)`, `.parallel2/3/4/N(...)`, `.branch(...)`, `.foreach(...)`), `PipelineBuildException`, internal `DefaultStepContext`, internal `FailsafePolicies` (translates FlowPipe policy types to Failsafe 3.x objects; never exposed beyond this package). Internal engine node types `EngineNode`, `StepNode`, `ParallelNode`, `BranchNode`, and `ForeachNode` are package-private sealed types not visible to callers.
 - `flowpipe-test` — test utilities (`StepHarness`, `Steps`, `RecordingMetricsRecorder`). Depends on `flowpipe-core` and re-exports JUnit 5 + AssertJ for downstream consumers.
 - Future optional modules (e.g. `flowpipe-spring`, `flowpipe-micrometer`) will live outside core and depend on it, never the reverse.
 
@@ -77,5 +78,5 @@ These should not be implemented and should not creep in via "while we're at it" 
 ## Working agreements for Claude sessions
 
 - Before designing or extending a feature, check the corresponding Mastra concept (overview, control-flow, workflow-state, error-handling docs). Note deliberately where FlowPipe diverges and why.
-- Do not introduce dependencies into `flowpipe-core` without explicit approval — every dependency is a tax on every consumer.
+- Do not introduce dependencies into `flowpipe-core` without explicit approval — every dependency is a tax on every consumer. Approved runtime deps are `slf4j-api` and `dev.failsafe:failsafe:3.3.2`; nothing else.
 - Build-time guarantees beat runtime checks. If a wiring mistake can be caught in `pipeline.build()`, it must be.
