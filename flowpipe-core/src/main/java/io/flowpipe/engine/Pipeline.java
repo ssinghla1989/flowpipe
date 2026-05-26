@@ -7,10 +7,13 @@ import dev.failsafe.TimeoutExceededException;
 import io.flowpipe.api.CircuitBreakerOpenException;
 import io.flowpipe.api.ExecutionTrace;
 import io.flowpipe.api.Failure;
+import io.flowpipe.api.NodeDescriptor;
+import io.flowpipe.api.PipelineDescriptor;
 import io.flowpipe.api.PipelineLifecycle;
 import io.flowpipe.api.Result;
 import io.flowpipe.api.RetryPolicy;
 import io.flowpipe.api.Step;
+import io.flowpipe.api.StepDescriptor;
 import io.flowpipe.api.StepTimeoutException;
 import io.flowpipe.api.TraceEntry;
 import io.flowpipe.api.Success;
@@ -69,6 +72,31 @@ public final class Pipeline<I, O> {
 
     public Class<O> outputType() {
         return outputType;
+    }
+
+    public PipelineDescriptor describe() {
+        List<NodeDescriptor> descriptors = new ArrayList<>(nodes.size());
+        for (EngineNode<?, ?> node : nodes) {
+            descriptors.add(toDescriptor(node));
+        }
+        return new PipelineDescriptor(inputType, outputType, descriptors);
+    }
+
+    private static NodeDescriptor toDescriptor(EngineNode<?, ?> node) {
+        if (node instanceof StepNode<?, ?> sn) {
+            return new NodeDescriptor.Step(sn.step().describe());
+        } else if (node instanceof ParallelNode<?, ?> pn) {
+            List<StepDescriptor<?, ?>> branches = new ArrayList<>(pn.branches().size());
+            for (Step<?, ?> branch : pn.branches()) {
+                branches.add(branch.describe());
+            }
+            return new NodeDescriptor.Parallel(branches, pn.declaredKeys());
+        } else if (node instanceof BranchNode<?, ?> bn) {
+            return new NodeDescriptor.Branch(bn.branchId(), bn.ifTrue().describe(), bn.ifFalse().describe());
+        } else if (node instanceof ForeachNode<?, ?> fn) {
+            return new NodeDescriptor.Foreach(fn.step().describe(), fn.concurrency());
+        }
+        throw new IllegalStateException("Unknown node type: " + node.getClass());
     }
 
     public Result<O> execute(I input) {
