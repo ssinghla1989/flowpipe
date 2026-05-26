@@ -8,6 +8,7 @@ import io.flowpipe.api.CircuitBreakerOpenException;
 import io.flowpipe.api.ExecutionTrace;
 import io.flowpipe.api.Failure;
 import io.flowpipe.api.NodeDescriptor;
+import io.flowpipe.api.PipelineDeadlineExceededException;
 import io.flowpipe.api.PipelineDescriptor;
 import io.flowpipe.api.PipelineLifecycle;
 import io.flowpipe.api.Result;
@@ -52,6 +53,7 @@ public final class Pipeline<I, O> {
     private final ExecutorService executor;
     private final PipelineLifecycle<I, O> lifecycle;
     private final Map<String, dev.failsafe.CircuitBreaker<Object>> circuitBreakers;
+    private final long deadlineMs;
 
     Pipeline(Class<I> inputType,
              Class<O> outputType,
@@ -60,7 +62,8 @@ public final class Pipeline<I, O> {
              SpanRecorder spanRecorder,
              ExecutorService executor,
              PipelineLifecycle<I, O> lifecycle,
-             Map<String, dev.failsafe.CircuitBreaker<Object>> circuitBreakers) {
+             Map<String, dev.failsafe.CircuitBreaker<Object>> circuitBreakers,
+             long deadlineMs) {
         this.inputType = inputType;
         this.outputType = outputType;
         this.nodes = nodes;
@@ -69,6 +72,7 @@ public final class Pipeline<I, O> {
         this.executor = executor;
         this.lifecycle = lifecycle;
         this.circuitBreakers = circuitBreakers;
+        this.deadlineMs = deadlineMs;
     }
 
     public Class<I> inputType() {
@@ -128,8 +132,12 @@ public final class Pipeline<I, O> {
             return failure;
         }
 
+        long deadlineNs = deadlineMs > 0
+            ? System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(deadlineMs)
+            : Long.MAX_VALUE;
+
         @SuppressWarnings("unchecked")
-        Result<O> result = (Result<O>) executeShared(input, ctx, context, recorder, traceBuilder);
+        Result<O> result = (Result<O>) executeShared(input, ctx, context, recorder, traceBuilder, deadlineNs);
 
         safeLifecycleCall("onFinish", () -> lifecycle.onFinish(result, ctx));
         if (result instanceof Failure<O> failure) {
@@ -159,9 +167,14 @@ public final class Pipeline<I, O> {
 
     // Package-private: called by executeBranch on arm pipelines to share State/context/recorder/traceBuilder.
     Result<?> executeShared(Object input, DefaultStepContext ctx, RequestContext context,
-                            MetricsRecorder recorder, ExecutionTrace.Builder traceBuilder) {
+                            MetricsRecorder recorder, ExecutionTrace.Builder traceBuilder,
+                            long deadlineNs) {
         Object current = input;
         for (EngineNode<?, ?> node : nodes) {
+            if (deadlineNs != Long.MAX_VALUE && System.nanoTime() > deadlineNs) {
+                return new Failure<>(
+                    new PipelineDeadlineExceededException(deadlineMs), "pipeline.deadline", traceBuilder.build());
+            }
             if (node instanceof StepNode<?, ?> sn) {
                 String stepId = sn.step().describe().id();
                 ItemResult result = executeItemWithRetry(sn.step(), current, stepId, ctx, context, recorder);
@@ -177,13 +190,13 @@ public final class Pipeline<I, O> {
                 }
                 current = ((ParallelSuccess) parallelResult).value();
             } else if (node instanceof BranchNode<?, ?> bn) {
-                BranchOutcome branchResult = executeBranch(bn, current, ctx, context, recorder, traceBuilder);
+                BranchOutcome branchResult = executeBranch(bn, current, ctx, context, recorder, traceBuilder, deadlineNs);
                 if (branchResult instanceof BranchFailure bf) {
                     return bf.failure();
                 }
                 current = ((BranchSuccess) branchResult).value();
             } else if (node instanceof ForeachNode<?, ?> fn) {
-                ForeachOutcome foreachResult = executeForeach(fn, current, ctx, context, recorder, traceBuilder);
+                ForeachOutcome foreachResult = executeForeach(fn, current, ctx, context, recorder, traceBuilder, deadlineNs);
                 if (foreachResult instanceof ForeachFailure ff) {
                     return ff.failure();
                 }
@@ -321,7 +334,7 @@ public final class Pipeline<I, O> {
     @SuppressWarnings({"unchecked", "rawtypes"})
     private BranchOutcome executeBranch(BranchNode bn, Object input, DefaultStepContext ctx,
                                         RequestContext context, MetricsRecorder recorder,
-                                        ExecutionTrace.Builder traceBuilder) {
+                                        ExecutionTrace.Builder traceBuilder, long deadlineNs) {
         String branchId = bn.branchId();
         long startedAtNanos = System.nanoTime();
         boolean selected;
@@ -340,7 +353,7 @@ public final class Pipeline<I, O> {
         Pipeline takenArm = selected ? bn.ifTrue() : bn.ifFalse();
         Pipeline skippedArm = selected ? bn.ifFalse() : bn.ifTrue();
 
-        Result<?> armResult = takenArm.executeShared(input, ctx, context, recorder, traceBuilder);
+        Result<?> armResult = takenArm.executeShared(input, ctx, context, recorder, traceBuilder, deadlineNs);
         if (armResult instanceof Failure<?> f) {
             return new BranchFailure((Failure<Object>) f);
         }
@@ -455,7 +468,7 @@ public final class Pipeline<I, O> {
     @SuppressWarnings("rawtypes")
     private ForeachOutcome executeForeach(ForeachNode fn, Object input, DefaultStepContext ctx,
                                           RequestContext context, MetricsRecorder recorder,
-                                          ExecutionTrace.Builder traceBuilder) {
+                                          ExecutionTrace.Builder traceBuilder, long deadlineNs) {
         List<?> items = (List<?>) input;
         String stepId = fn.step().describe().id();
         int concurrency = fn.concurrency();
@@ -463,6 +476,10 @@ public final class Pipeline<I, O> {
 
         if (concurrency == 1) {
             for (int i = 0; i < items.size(); i++) {
+                if (deadlineNs != Long.MAX_VALUE && System.nanoTime() > deadlineNs) {
+                    return new ForeachFailure(new Failure<>(
+                        new PipelineDeadlineExceededException(deadlineMs), "pipeline.deadline", traceBuilder.build()));
+                }
                 String itemLabel = stepId + "[" + i + "]";
                 ItemResult result = executeItemWithRetry(fn.step(), items.get(i), itemLabel, ctx, context, recorder);
                 traceBuilder.append(result.trace());
@@ -473,6 +490,10 @@ public final class Pipeline<I, O> {
             }
         } else {
             for (int windowStart = 0; windowStart < items.size(); windowStart += concurrency) {
+                if (deadlineNs != Long.MAX_VALUE && System.nanoTime() > deadlineNs) {
+                    return new ForeachFailure(new Failure<>(
+                        new PipelineDeadlineExceededException(deadlineMs), "pipeline.deadline", traceBuilder.build()));
+                }
                 int windowEnd = Math.min(windowStart + concurrency, items.size());
                 List<Future<ItemResult>> futures = new ArrayList<>(windowEnd - windowStart);
 

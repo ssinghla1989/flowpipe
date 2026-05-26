@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BiFunction;
 import java.util.function.BiPredicate;
 import java.util.function.Function;
@@ -30,6 +31,7 @@ public final class PipelineBuilder<I, O> {
     private SpanRecorder spanRecorder;
     private ExecutorService executor;
     private PipelineLifecycle<I, O> lifecycle;
+    private long deadlineMs;
     private boolean consumed;
 
     @SuppressWarnings("unchecked")
@@ -39,7 +41,8 @@ public final class PipelineBuilder<I, O> {
                             MetricsRecorder metricsRecorder,
                             SpanRecorder spanRecorder,
                             ExecutorService executor,
-                            PipelineLifecycle<I, O> lifecycle) {
+                            PipelineLifecycle<I, O> lifecycle,
+                            long deadlineMs) {
         this.inputType = inputType;
         this.currentOutputType = currentOutputType;
         this.nodes = nodes;
@@ -47,6 +50,7 @@ public final class PipelineBuilder<I, O> {
         this.spanRecorder = spanRecorder;
         this.executor = executor;
         this.lifecycle = lifecycle;
+        this.deadlineMs = deadlineMs;
     }
 
     @SuppressWarnings("unchecked")
@@ -54,16 +58,14 @@ public final class PipelineBuilder<I, O> {
         Objects.requireNonNull(inputType, "inputType");
         return new PipelineBuilder<>(inputType, inputType, new ArrayList<>(),
             NoOpMetricsRecorder.instance(), NoOpSpanRecorder.instance(), null,
-            (PipelineLifecycle<I, I>) (PipelineLifecycle<?, ?>) NOOP_LIFECYCLE);
+            (PipelineLifecycle<I, I>) (PipelineLifecycle<?, ?>) NOOP_LIFECYCLE, 0L);
     }
 
     public <X> PipelineBuilder<I, X> then(Step<O, X> next) {
         ensureUsable();
         Objects.requireNonNull(next, "next");
         Class<?> declaredInput = next.describe().inputType();
-        // Object.class is the sentinel stored by parallel2/3/4 when the combiner's return type
-        // is erased at runtime; skip the check to avoid a false rejection in that case.
-        if (!currentOutputType.equals(Object.class) && !declaredInput.equals(currentOutputType)) {
+        if (!declaredInput.equals(currentOutputType)) {
             throw new PipelineBuildException(
                 "Step '" + next.describe().id() + "' declares inputType "
                     + declaredInput.getName()
@@ -73,14 +75,16 @@ public final class PipelineBuilder<I, O> {
         nodes.add(new StepNode<>(next));
         consumed = true;
         return new PipelineBuilder<>(inputType, next.describe().outputType(), nodes, metricsRecorder, spanRecorder, executor,
-            castLifecycle(lifecycle));
+            castLifecycle(lifecycle), deadlineMs);
     }
 
     public <A, B, R> PipelineBuilder<I, R> parallel2(
+            Class<R> resultType,
             BiFunction<A, B, R> combiner,
             Step<O, A> stepA,
             Step<O, B> stepB) {
         ensureUsable();
+        Objects.requireNonNull(resultType, "resultType");
         Objects.requireNonNull(combiner, "combiner");
         Objects.requireNonNull(stepA, "stepA");
         Objects.requireNonNull(stepB, "stepB");
@@ -92,19 +96,19 @@ public final class PipelineBuilder<I, O> {
             B b = (B) results.get(1);
             return combiner.apply(a, b);
         };
-        @SuppressWarnings({"unchecked", "rawtypes"})
-        Class<R> resultType = (Class<R>) (Class) Object.class;
         nodes.add(new ParallelNode<>(branches, adaptedCombiner, null));
         consumed = true;
-        return new PipelineBuilder<>(inputType, resultType, nodes, metricsRecorder, spanRecorder, executor, castLifecycle(lifecycle));
+        return new PipelineBuilder<>(inputType, resultType, nodes, metricsRecorder, spanRecorder, executor, castLifecycle(lifecycle), deadlineMs);
     }
 
     public <A, B, C, R> PipelineBuilder<I, R> parallel3(
+            Class<R> resultType,
             TriFunction<A, B, C, R> combiner,
             Step<O, A> stepA,
             Step<O, B> stepB,
             Step<O, C> stepC) {
         ensureUsable();
+        Objects.requireNonNull(resultType, "resultType");
         Objects.requireNonNull(combiner, "combiner");
         Objects.requireNonNull(stepA, "stepA");
         Objects.requireNonNull(stepB, "stepB");
@@ -119,20 +123,20 @@ public final class PipelineBuilder<I, O> {
             C c = (C) results.get(2);
             return combiner.apply(a, b, c);
         };
-        @SuppressWarnings({"unchecked", "rawtypes"})
-        Class<R> resultType = (Class<R>) (Class) Object.class;
         nodes.add(new ParallelNode<>(branches, adaptedCombiner, null));
         consumed = true;
-        return new PipelineBuilder<>(inputType, resultType, nodes, metricsRecorder, spanRecorder, executor, castLifecycle(lifecycle));
+        return new PipelineBuilder<>(inputType, resultType, nodes, metricsRecorder, spanRecorder, executor, castLifecycle(lifecycle), deadlineMs);
     }
 
     public <A, B, C, D, R> PipelineBuilder<I, R> parallel4(
+            Class<R> resultType,
             QuadFunction<A, B, C, D, R> combiner,
             Step<O, A> stepA,
             Step<O, B> stepB,
             Step<O, C> stepC,
             Step<O, D> stepD) {
         ensureUsable();
+        Objects.requireNonNull(resultType, "resultType");
         Objects.requireNonNull(combiner, "combiner");
         Objects.requireNonNull(stepA, "stepA");
         Objects.requireNonNull(stepB, "stepB");
@@ -150,11 +154,9 @@ public final class PipelineBuilder<I, O> {
             D d = (D) results.get(3);
             return combiner.apply(a, b, c, d);
         };
-        @SuppressWarnings({"unchecked", "rawtypes"})
-        Class<R> resultType = (Class<R>) (Class) Object.class;
         nodes.add(new ParallelNode<>(branches, adaptedCombiner, null));
         consumed = true;
-        return new PipelineBuilder<>(inputType, resultType, nodes, metricsRecorder, spanRecorder, executor, castLifecycle(lifecycle));
+        return new PipelineBuilder<>(inputType, resultType, nodes, metricsRecorder, spanRecorder, executor, castLifecycle(lifecycle), deadlineMs);
     }
 
     public <R> PipelineBuilder<I, R> parallelN(
@@ -176,7 +178,7 @@ public final class PipelineBuilder<I, O> {
         };
         nodes.add(new ParallelNode<>(branches, adaptedCombiner, List.copyOf(keyOrder)));
         consumed = true;
-        return new PipelineBuilder<>(inputType, resultType, nodes, metricsRecorder, spanRecorder, executor, castLifecycle(lifecycle));
+        return new PipelineBuilder<>(inputType, resultType, nodes, metricsRecorder, spanRecorder, executor, castLifecycle(lifecycle), deadlineMs);
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -217,7 +219,7 @@ public final class PipelineBuilder<I, O> {
         BiPredicate<Object, StepContext> rawPredicate = (BiPredicate) predicate;
         nodes.add(new BranchNode<>(branchId, rawPredicate, ifTrue, ifFalse));
         consumed = true;
-        return new PipelineBuilder<>(inputType, ifTrue.outputType(), nodes, metricsRecorder, spanRecorder, executor, castLifecycle(lifecycle));
+        return new PipelineBuilder<>(inputType, ifTrue.outputType(), nodes, metricsRecorder, spanRecorder, executor, castLifecycle(lifecycle), deadlineMs);
     }
 
     public <E, R> PipelineBuilder<I, List<R>> foreach(Step<E, R> step) {
@@ -240,7 +242,7 @@ public final class PipelineBuilder<I, O> {
         nodes.add(new ForeachNode<>(step, concurrency));
         consumed = true;
         return new PipelineBuilder<>(inputType, (Class<List<R>>) (Class) List.class, nodes, metricsRecorder, spanRecorder, executor,
-            castLifecycle(lifecycle));
+            castLifecycle(lifecycle), deadlineMs);
     }
 
     public PipelineBuilder<I, O> withMetrics(MetricsRecorder recorder) {
@@ -271,6 +273,20 @@ public final class PipelineBuilder<I, O> {
         return this;
     }
 
+    public PipelineBuilder<I, O> withDeadline(long ms) {
+        ensureUsable();
+        if (ms < 1) {
+            throw new IllegalArgumentException("deadline ms must be >= 1, got: " + ms);
+        }
+        this.deadlineMs = ms;
+        return this;
+    }
+
+    public PipelineBuilder<I, O> withDeadline(long duration, TimeUnit unit) {
+        Objects.requireNonNull(unit, "unit");
+        return withDeadline(unit.toMillis(duration));
+    }
+
     public Pipeline<I, O> build() {
         ensureUsable();
         consumed = true;
@@ -278,7 +294,7 @@ public final class PipelineBuilder<I, O> {
         ExecutorService resolved = (executor != null) ? executor : ForkJoinPool.commonPool();
         var circuitBreakers = buildCircuitBreakers(nodes);
         return new Pipeline<>(inputType, currentOutputType, List.copyOf(nodes), metricsRecorder,
-            spanRecorder, resolved, lifecycle, circuitBreakers);
+            spanRecorder, resolved, lifecycle, circuitBreakers, deadlineMs);
     }
 
     private static java.util.Map<String, dev.failsafe.CircuitBreaker<Object>> buildCircuitBreakers(

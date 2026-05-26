@@ -79,7 +79,7 @@ class PipelineDescribeTest {
         Step<String, Integer> lenB = Step.of("len-b", String.class, Integer.class, (s, ctx) -> s.length() * 2);
 
         Pipeline<String, Integer> pipeline = PipelineBuilder.start(String.class)
-            .parallel2(Integer::sum, lenA, lenB)
+            .parallel2(Integer.class, Integer::sum, lenA, lenB)
             .build();
 
         NodeDescriptor.Parallel parallel = (NodeDescriptor.Parallel) pipeline.describe().nodes().get(0);

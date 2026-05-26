@@ -66,6 +66,7 @@ public final class OrderProcessingPipeline {
             .withMetrics(metricsRecorder)
             .then(OrderProcessingSteps.validateOrder())
             .parallel2(
+                OrderContext.class,
                 OrderContext::new,
                 OrderProcessingSteps.checkInventory(inventoryService),
                 OrderProcessingSteps.calculateOrderTotal()

@@ -50,7 +50,7 @@ class ParallelCompositionTest {
         });
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
-            .parallel2((a, b) -> a, stepA, stepB)
+            .parallel2(String.class, (a, b) -> a, stepA, stepB)
             .build();
 
         pipeline.execute("hello");
@@ -82,7 +82,7 @@ class ParallelCompositionTest {
         ExecutorService exec = Executors.newFixedThreadPool(2);
         try {
             Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
-                .parallel2((a, b) -> a + b, stepA, stepB)
+                .parallel2(String.class, (a, b) -> a + b, stepA, stepB)
                 .withExecutor(exec)
                 .build();
 
@@ -111,7 +111,7 @@ class ParallelCompositionTest {
         ExecutorService exec = Executors.newFixedThreadPool(2);
         try {
             Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
-                .parallel2((a, b) -> a, stepA, stepB)
+                .parallel2(String.class, (a, b) -> a, stepA, stepB)
                 .withExecutor(exec)
                 .then(after)
                 .build();
@@ -137,7 +137,7 @@ class ParallelCompositionTest {
         ExecutorService exec = Executors.newFixedThreadPool(2);
         try {
             Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
-                .parallel2((a, b) -> a, stepA, stepB)
+                .parallel2(String.class, (a, b) -> a, stepA, stepB)
                 .withExecutor(exec)
                 .build();
 
@@ -158,7 +158,7 @@ class ParallelCompositionTest {
 
         // Combiner: BiFunction<String, Integer, String> — result type is String, no cast needed
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
-            .parallel2((a, b) -> a + b, stepA, stepB)
+            .parallel2(String.class, (a, b) -> a + b, stepA, stepB)
             .build();
 
         Result<String> result = pipeline.execute("hi");
@@ -179,7 +179,7 @@ class ParallelCompositionTest {
         ExecutorService exec = Executors.newFixedThreadPool(2);
         try {
             PipelineBuilder.start(String.class)
-                .parallel2((a, b) -> a, stepA, stepB)
+                .parallel2(String.class, (a, b) -> a, stepA, stepB)
                 .withExecutor(exec)
                 .build()
                 .execute("x");
@@ -218,7 +218,7 @@ class ParallelCompositionTest {
         ExecutorService exec = Executors.newFixedThreadPool(2);
         try {
             PipelineBuilder.start(String.class)
-                .parallel2((a, b) -> a, stable, unstable)
+                .parallel2(String.class, (a, b) -> a, stable, unstable)
                 .withExecutor(exec)
                 .build()
                 .execute("x");
@@ -248,7 +248,7 @@ class ParallelCompositionTest {
         ExecutorService exec = Executors.newFixedThreadPool(2);
         try {
             PipelineBuilder.start(String.class)
-                .parallel2((a, b) -> a, stepA, stepB)
+                .parallel2(String.class, (a, b) -> a, stepA, stepB)
                 .withExecutor(exec)
                 .withMetrics(rec)
                 .build()
@@ -274,7 +274,7 @@ class ParallelCompositionTest {
         Step<String, String> stepB = Step.of("b", String.class, String.class, (s, ctx) -> s);
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
-            .parallel2((a, b) -> a, stepA, stepB)
+            .parallel2(String.class, (a, b) -> a, stepA, stepB)
             .build();
 
         Result<String> result = pipeline.execute("x");
@@ -295,7 +295,7 @@ class ParallelCompositionTest {
         Step<String, String> stepB = Step.of("b", String.class, String.class, (s, ctx) -> s);
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
-            .parallel2((a, b) -> a, stepA, stepB)
+            .parallel2(String.class, (a, b) -> a, stepA, stepB)
             .withExecutor(exec)
             .build();
 
@@ -329,7 +329,7 @@ class ParallelCompositionTest {
         assertThatThrownBy(() ->
             PipelineBuilder.start(String.class)
                 .then(seq)
-                .parallel2((a, b) -> a, branchA, branchB)
+                .parallel2(String.class, (a, b) -> a, branchA, branchB)
                 .build()
         ).isInstanceOf(PipelineBuildException.class)
             .hasMessageContaining("validate");
@@ -359,6 +359,23 @@ class ParallelCompositionTest {
         assertThatThrownBy(() ->
             PipelineBuilder.start(String.class).withExecutor(null)
         ).isInstanceOf(NullPointerException.class);
+    }
+
+    // 5.16 — then() after parallel2 rejects a type mismatch at build time (regression: was silently bypassed)
+    @Test
+    void then_after_parallel2_rejects_downstream_type_mismatch() {
+        Step<String, String> stepA = Step.of("a", String.class, String.class, (s, ctx) -> s);
+        Step<String, String> stepB = Step.of("b", String.class, String.class, (s, ctx) -> s);
+        Step<Integer, Integer> wrongNext = Step.of("wrong", Integer.class, Integer.class, (n, ctx) -> n);
+
+        assertThatThrownBy(() ->
+            PipelineBuilder.start(String.class)
+                .parallel2(String.class, (a, b) -> a, stepA, stepB)
+                .then(wrongNext)
+        ).isInstanceOf(PipelineBuildException.class)
+            .hasMessageContaining("wrong")
+            .hasMessageContaining("Integer")
+            .hasMessageContaining("String");
     }
 
     // 5.15 — parallelN combiner receives a Map keyed by step ids with correct output values
