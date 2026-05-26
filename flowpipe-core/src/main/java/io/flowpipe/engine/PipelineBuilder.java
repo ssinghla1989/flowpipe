@@ -7,6 +7,8 @@ import io.flowpipe.api.TriFunction;
 import io.flowpipe.api.QuadFunction;
 import io.flowpipe.observability.MetricsRecorder;
 import io.flowpipe.observability.NoOpMetricsRecorder;
+import io.flowpipe.observability.NoOpSpanRecorder;
+import io.flowpipe.observability.SpanRecorder;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -25,6 +27,7 @@ public final class PipelineBuilder<I, O> {
     private final Class<O> currentOutputType;
     private final List<EngineNode<?, ?>> nodes;
     private MetricsRecorder metricsRecorder;
+    private SpanRecorder spanRecorder;
     private ExecutorService executor;
     private PipelineLifecycle<I, O> lifecycle;
     private boolean consumed;
@@ -34,12 +37,14 @@ public final class PipelineBuilder<I, O> {
                             Class<O> currentOutputType,
                             List<EngineNode<?, ?>> nodes,
                             MetricsRecorder metricsRecorder,
+                            SpanRecorder spanRecorder,
                             ExecutorService executor,
                             PipelineLifecycle<I, O> lifecycle) {
         this.inputType = inputType;
         this.currentOutputType = currentOutputType;
         this.nodes = nodes;
         this.metricsRecorder = metricsRecorder;
+        this.spanRecorder = spanRecorder;
         this.executor = executor;
         this.lifecycle = lifecycle;
     }
@@ -47,7 +52,8 @@ public final class PipelineBuilder<I, O> {
     @SuppressWarnings("unchecked")
     public static <I> PipelineBuilder<I, I> start(Class<I> inputType) {
         Objects.requireNonNull(inputType, "inputType");
-        return new PipelineBuilder<>(inputType, inputType, new ArrayList<>(), NoOpMetricsRecorder.instance(), null,
+        return new PipelineBuilder<>(inputType, inputType, new ArrayList<>(),
+            NoOpMetricsRecorder.instance(), NoOpSpanRecorder.instance(), null,
             (PipelineLifecycle<I, I>) (PipelineLifecycle<?, ?>) NOOP_LIFECYCLE);
     }
 
@@ -66,7 +72,7 @@ public final class PipelineBuilder<I, O> {
         }
         nodes.add(new StepNode<>(next));
         consumed = true;
-        return new PipelineBuilder<>(inputType, next.describe().outputType(), nodes, metricsRecorder, executor,
+        return new PipelineBuilder<>(inputType, next.describe().outputType(), nodes, metricsRecorder, spanRecorder, executor,
             castLifecycle(lifecycle));
     }
 
@@ -90,7 +96,7 @@ public final class PipelineBuilder<I, O> {
         Class<R> resultType = (Class<R>) (Class) Object.class;
         nodes.add(new ParallelNode<>(branches, adaptedCombiner, null));
         consumed = true;
-        return new PipelineBuilder<>(inputType, resultType, nodes, metricsRecorder, executor, castLifecycle(lifecycle));
+        return new PipelineBuilder<>(inputType, resultType, nodes, metricsRecorder, spanRecorder, executor, castLifecycle(lifecycle));
     }
 
     public <A, B, C, R> PipelineBuilder<I, R> parallel3(
@@ -117,7 +123,7 @@ public final class PipelineBuilder<I, O> {
         Class<R> resultType = (Class<R>) (Class) Object.class;
         nodes.add(new ParallelNode<>(branches, adaptedCombiner, null));
         consumed = true;
-        return new PipelineBuilder<>(inputType, resultType, nodes, metricsRecorder, executor, castLifecycle(lifecycle));
+        return new PipelineBuilder<>(inputType, resultType, nodes, metricsRecorder, spanRecorder, executor, castLifecycle(lifecycle));
     }
 
     public <A, B, C, D, R> PipelineBuilder<I, R> parallel4(
@@ -148,7 +154,7 @@ public final class PipelineBuilder<I, O> {
         Class<R> resultType = (Class<R>) (Class) Object.class;
         nodes.add(new ParallelNode<>(branches, adaptedCombiner, null));
         consumed = true;
-        return new PipelineBuilder<>(inputType, resultType, nodes, metricsRecorder, executor, castLifecycle(lifecycle));
+        return new PipelineBuilder<>(inputType, resultType, nodes, metricsRecorder, spanRecorder, executor, castLifecycle(lifecycle));
     }
 
     public <R> PipelineBuilder<I, R> parallelN(
@@ -170,7 +176,7 @@ public final class PipelineBuilder<I, O> {
         };
         nodes.add(new ParallelNode<>(branches, adaptedCombiner, List.copyOf(keyOrder)));
         consumed = true;
-        return new PipelineBuilder<>(inputType, resultType, nodes, metricsRecorder, executor, castLifecycle(lifecycle));
+        return new PipelineBuilder<>(inputType, resultType, nodes, metricsRecorder, spanRecorder, executor, castLifecycle(lifecycle));
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -211,7 +217,7 @@ public final class PipelineBuilder<I, O> {
         BiPredicate<Object, StepContext> rawPredicate = (BiPredicate) predicate;
         nodes.add(new BranchNode<>(branchId, rawPredicate, ifTrue, ifFalse));
         consumed = true;
-        return new PipelineBuilder<>(inputType, ifTrue.outputType(), nodes, metricsRecorder, executor, castLifecycle(lifecycle));
+        return new PipelineBuilder<>(inputType, ifTrue.outputType(), nodes, metricsRecorder, spanRecorder, executor, castLifecycle(lifecycle));
     }
 
     public <E, R> PipelineBuilder<I, List<R>> foreach(Step<E, R> step) {
@@ -233,7 +239,7 @@ public final class PipelineBuilder<I, O> {
         }
         nodes.add(new ForeachNode<>(step, concurrency));
         consumed = true;
-        return new PipelineBuilder<>(inputType, (Class<List<R>>) (Class) List.class, nodes, metricsRecorder, executor,
+        return new PipelineBuilder<>(inputType, (Class<List<R>>) (Class) List.class, nodes, metricsRecorder, spanRecorder, executor,
             castLifecycle(lifecycle));
     }
 
@@ -241,6 +247,13 @@ public final class PipelineBuilder<I, O> {
         ensureUsable();
         Objects.requireNonNull(recorder, "recorder");
         this.metricsRecorder = recorder;
+        return this;
+    }
+
+    public PipelineBuilder<I, O> withTracing(SpanRecorder recorder) {
+        ensureUsable();
+        Objects.requireNonNull(recorder, "recorder");
+        this.spanRecorder = recorder;
         return this;
     }
 
@@ -265,7 +278,7 @@ public final class PipelineBuilder<I, O> {
         ExecutorService resolved = (executor != null) ? executor : ForkJoinPool.commonPool();
         var circuitBreakers = buildCircuitBreakers(nodes);
         return new Pipeline<>(inputType, currentOutputType, List.copyOf(nodes), metricsRecorder,
-            resolved, lifecycle, circuitBreakers);
+            spanRecorder, resolved, lifecycle, circuitBreakers);
     }
 
     private static java.util.Map<String, dev.failsafe.CircuitBreaker<Object>> buildCircuitBreakers(
