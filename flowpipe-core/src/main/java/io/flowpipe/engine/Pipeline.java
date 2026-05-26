@@ -18,6 +18,8 @@ import io.flowpipe.api.StepTimeoutException;
 import io.flowpipe.api.TraceEntry;
 import io.flowpipe.api.Success;
 import io.flowpipe.observability.MetricsRecorder;
+import io.flowpipe.observability.NoOpSpanRecorder;
+import io.flowpipe.observability.SpanRecorder;
 import io.flowpipe.observability.StepOutcome;
 import io.flowpipe.state.RequestContext;
 import io.flowpipe.state.State;
@@ -46,6 +48,7 @@ public final class Pipeline<I, O> {
     private final Class<O> outputType;
     private final List<EngineNode<?, ?>> nodes;
     private final MetricsRecorder defaultRecorder;
+    private final SpanRecorder spanRecorder;
     private final ExecutorService executor;
     private final PipelineLifecycle<I, O> lifecycle;
     private final Map<String, dev.failsafe.CircuitBreaker<Object>> circuitBreakers;
@@ -54,6 +57,7 @@ public final class Pipeline<I, O> {
              Class<O> outputType,
              List<EngineNode<?, ?>> nodes,
              MetricsRecorder defaultRecorder,
+             SpanRecorder spanRecorder,
              ExecutorService executor,
              PipelineLifecycle<I, O> lifecycle,
              Map<String, dev.failsafe.CircuitBreaker<Object>> circuitBreakers) {
@@ -61,6 +65,7 @@ public final class Pipeline<I, O> {
         this.outputType = outputType;
         this.nodes = nodes;
         this.defaultRecorder = defaultRecorder;
+        this.spanRecorder = spanRecorder;
         this.executor = executor;
         this.lifecycle = lifecycle;
         this.circuitBreakers = circuitBreakers;
@@ -117,7 +122,10 @@ public final class Pipeline<I, O> {
         try {
             lifecycle.onStart(input, ctx);
         } catch (Throwable t) {
-            return new Failure<>(t, "pipeline.onStart", traceBuilder.build());
+            Failure<O> failure = new Failure<>(t, "pipeline.onStart", traceBuilder.build());
+            safeLifecycleCall("onFinish", () -> lifecycle.onFinish(failure, ctx));
+            safeLifecycleCall("onError", () -> lifecycle.onError(failure, ctx));
+            return failure;
         }
 
         @SuppressWarnings("unchecked")
@@ -236,6 +244,7 @@ public final class Pipeline<I, O> {
 
         long totalStartNanos = System.nanoTime();
         AtomicInteger lastAttempt = new AtomicInteger(1);
+        Object span = safeStartSpan(spanRecorder, itemLabel, context);
 
         try {
             Object output;
@@ -256,6 +265,7 @@ public final class Pipeline<I, O> {
             long totalDurationNanos = System.nanoTime() - totalStartNanos;
             emitRecord(recorder, itemLabel, totalDurationNanos, attempt, StepOutcome.SUCCESS);
             emitFinish(itemLabel, attempt, totalDurationNanos, context);
+            safeFinishSpan(spanRecorder, span, StepOutcome.SUCCESS, null);
             return new ItemSuccess(output, new TraceEntry(itemLabel, totalStartNanos, totalDurationNanos, attempt, false));
 
         } catch (dev.failsafe.CircuitBreakerOpenException cboe) {
@@ -264,6 +274,7 @@ public final class Pipeline<I, O> {
             CircuitBreakerOpenException fpEx = new CircuitBreakerOpenException(itemLabel, retriableAfter);
             emitCircuitOpen(itemLabel, retriableAfter, context);
             emitRecord(recorder, itemLabel, durationNanos, 1, StepOutcome.FAILURE);
+            safeFinishSpan(spanRecorder, span, StepOutcome.FAILURE, fpEx);
             return new ItemFailure(fpEx, itemLabel,
                 new TraceEntry(itemLabel, totalStartNanos, durationNanos, 1, false));
 
@@ -275,6 +286,7 @@ public final class Pipeline<I, O> {
             StepTimeoutException ste = new StepTimeoutException(itemLabel, timeoutMs);
             if (maxAttempts <= 1) emitError(itemLabel, attempt, durationNanos, context, ste);
             emitRecord(recorder, itemLabel, durationNanos, attempt, StepOutcome.FAILURE);
+            safeFinishSpan(spanRecorder, span, StepOutcome.FAILURE, ste);
             return new ItemFailure(ste, itemLabel,
                 new TraceEntry(itemLabel, totalStartNanos, durationNanos, attempt, false));
 
@@ -282,11 +294,13 @@ public final class Pipeline<I, O> {
             // Unwrap Failsafe wrapper if present so the original exception surfaces in Failure.cause().
             Throwable cause = (t instanceof FailsafeException fe && fe.getCause() != null)
                 ? fe.getCause() : t;
+            if (cause instanceof InterruptedException) Thread.currentThread().interrupt();
             long durationNanos = System.nanoTime() - totalStartNanos;
             int attempt = lastAttempt.get();
             // When maxAttempts > 1, onFailedAttempt already emitted step.error for every attempt.
             if (maxAttempts <= 1) emitError(itemLabel, attempt, durationNanos, context, cause);
             emitRecord(recorder, itemLabel, durationNanos, attempt, StepOutcome.FAILURE);
+            safeFinishSpan(spanRecorder, span, StepOutcome.FAILURE, cause);
             return new ItemFailure(cause, itemLabel,
                 new TraceEntry(itemLabel, totalStartNanos, durationNanos, attempt, false));
         }
@@ -315,6 +329,8 @@ public final class Pipeline<I, O> {
             selected = bn.predicate().test(input, ctx);
         } catch (Throwable t) {
             long durationNanos = System.nanoTime() - startedAtNanos;
+            emitError(branchId, 1, durationNanos, context, t);
+            emitRecord(recorder, branchId, durationNanos, 1, StepOutcome.FAILURE);
             traceBuilder.append(new TraceEntry(branchId, startedAtNanos, durationNanos, 1, false));
             return new BranchFailure(new Failure<>(t, branchId, traceBuilder.build()));
         }
@@ -330,36 +346,42 @@ public final class Pipeline<I, O> {
         }
         Object value = ((Success<?>) armResult).value();
 
-        emitSkipped(skippedArm.nodes, branchId, recorder, traceBuilder, context);
+        emitSkipped(skippedArm.nodes, branchId, recorder, spanRecorder, traceBuilder, context);
         return new BranchSuccess(value);
     }
 
     private static void emitSkipped(List<EngineNode<?, ?>> skippedNodes, String branchId,
-                                    MetricsRecorder recorder, ExecutionTrace.Builder traceBuilder,
-                                    RequestContext context) {
+                                    MetricsRecorder recorder, SpanRecorder spanRecorder,
+                                    ExecutionTrace.Builder traceBuilder, RequestContext context) {
         for (EngineNode<?, ?> node : skippedNodes) {
             if (node instanceof StepNode<?, ?> sn) {
                 String stepId = sn.step().describe().id();
                 traceBuilder.append(new TraceEntry(stepId, 0L, 0L, 0, true));
                 emitRecord(recorder, stepId, 0L, 0, StepOutcome.SKIPPED);
                 emitSkip(stepId, branchId, context);
+                Object span = safeStartSpan(spanRecorder, stepId, context);
+                safeFinishSpan(spanRecorder, span, StepOutcome.SKIPPED, null);
             } else if (node instanceof ParallelNode<?, ?> pn) {
                 for (Step<?, ?> branch : pn.branches()) {
                     String stepId = branch.describe().id();
                     traceBuilder.append(new TraceEntry(stepId, 0L, 0L, 0, true));
                     emitRecord(recorder, stepId, 0L, 0, StepOutcome.SKIPPED);
                     emitSkip(stepId, branchId, context);
+                    Object span = safeStartSpan(spanRecorder, stepId, context);
+                    safeFinishSpan(spanRecorder, span, StepOutcome.SKIPPED, null);
                 }
             } else if (node instanceof BranchNode<?, ?> bn) {
                 traceBuilder.append(new TraceEntry(bn.branchId(), 0L, 0L, 0, true));
                 emitSkip(bn.branchId(), branchId, context);
-                emitSkipped(bn.ifTrue().nodes, branchId, recorder, traceBuilder, context);
-                emitSkipped(bn.ifFalse().nodes, branchId, recorder, traceBuilder, context);
+                emitSkipped(bn.ifTrue().nodes, branchId, recorder, spanRecorder, traceBuilder, context);
+                emitSkipped(bn.ifFalse().nodes, branchId, recorder, spanRecorder, traceBuilder, context);
             } else if (node instanceof ForeachNode<?, ?> fn) {
                 String stepId = fn.step().describe().id();
                 traceBuilder.append(new TraceEntry(stepId, 0L, 0L, 0, true));
                 emitRecord(recorder, stepId, 0L, 0, StepOutcome.SKIPPED);
                 emitSkip(stepId, branchId, context);
+                Object span = safeStartSpan(spanRecorder, stepId, context);
+                safeFinishSpan(spanRecorder, span, StepOutcome.SKIPPED, null);
             }
         }
     }
@@ -374,6 +396,7 @@ public final class Pipeline<I, O> {
         for (Step<Object, ?> branch : branches) {
             String stepId = branch.describe().id();
             Callable<BranchResult> task = () -> {
+                Object span = safeStartSpan(spanRecorder, stepId, context);
                 emitStart(stepId, 1, context);
                 long startedAtNanos = System.nanoTime();
                 try {
@@ -382,12 +405,14 @@ public final class Pipeline<I, O> {
                     TraceEntry entry = new TraceEntry(stepId, startedAtNanos, durationNanos, 1, false);
                     emitRecord(recorder, stepId, durationNanos, 1, StepOutcome.SUCCESS);
                     emitFinish(stepId, 1, durationNanos, context);
+                    safeFinishSpan(spanRecorder, span, StepOutcome.SUCCESS, null);
                     return new BranchResult(stepId, output, entry, null);
                 } catch (Throwable t) {
                     long durationNanos = System.nanoTime() - startedAtNanos;
                     TraceEntry entry = new TraceEntry(stepId, startedAtNanos, durationNanos, 1, false);
                     emitRecord(recorder, stepId, durationNanos, 1, StepOutcome.FAILURE);
                     emitError(stepId, 1, durationNanos, context, t);
+                    safeFinishSpan(spanRecorder, span, StepOutcome.FAILURE, t);
                     return new BranchResult(stepId, null, entry, t);
                 }
             };
@@ -499,6 +524,10 @@ public final class Pipeline<I, O> {
     private static Object invokeStep(Step step, Object input, DefaultStepContext ctx) throws Exception {
         step.describe().inputValidator().validate(input);
         Object output = step.execute(input, ctx);
+        if (output == null) {
+            throw new NullPointerException(
+                "Step '" + step.describe().id() + "' returned null; step outputs must not be null");
+        }
         step.describe().outputValidator().validate(output);
         return output;
     }
@@ -598,8 +627,41 @@ public final class Pipeline<I, O> {
         }
     }
 
+    private static Object safeStartSpan(SpanRecorder recorder, String stepId, RequestContext context) {
+        try {
+            return recorder.startStep(stepId, context);
+        } catch (Throwable t) {
+            LOG.atWarn()
+                .setMessage("tracing.recorder_failed")
+                .addKeyValue("step.id", stepId)
+                .addKeyValue("tracing.op", "startStep")
+                .addKeyValue("error.class", t.getClass().getName())
+                .addKeyValue("error.message", t.getMessage() == null ? "" : t.getMessage())
+                .log();
+            return null;
+        }
+    }
+
+    private static void safeFinishSpan(SpanRecorder recorder, Object span,
+                                       StepOutcome outcome, Throwable cause) {
+        try {
+            recorder.finishStep(span, outcome, cause);
+        } catch (Throwable t) {
+            LOG.atWarn()
+                .setMessage("tracing.recorder_failed")
+                .addKeyValue("tracing.op", "finishStep")
+                .addKeyValue("error.class", t.getClass().getName())
+                .addKeyValue("error.message", t.getMessage() == null ? "" : t.getMessage())
+                .log();
+        }
+    }
+
     MetricsRecorder defaultRecorder() {
         return defaultRecorder;
+    }
+
+    SpanRecorder spanRecorder() {
+        return spanRecorder;
     }
 
     private record BranchResult(String stepId, Object output, TraceEntry entry, Throwable failure) {}
