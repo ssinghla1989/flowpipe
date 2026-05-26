@@ -1,12 +1,12 @@
 package io.flowpipe.state;
 
-import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 
 public final class State {
 
-    private final Map<StateKey<?>, Object> values = new HashMap<>();
+    private final Map<StateKey<?>, Object> values = new ConcurrentHashMap<>();
 
     public State() {
     }

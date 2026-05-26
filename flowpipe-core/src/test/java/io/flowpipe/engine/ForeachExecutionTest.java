@@ -13,6 +13,7 @@ import io.flowpipe.observability.StepOutcome;
 import io.flowpipe.observability.TestMetricsRecorder;
 import io.flowpipe.observability.TestMetricsRecorder.OutcomeEvent;
 import io.flowpipe.state.RequestContext;
+import io.flowpipe.state.StateKey;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -167,6 +168,29 @@ class ForeachExecutionTest {
 
         assertThat(r).isInstanceOf(Failure.class);
         assertThat(((Failure<List<String>>) r).failedStepId()).isEqualTo("slow-fail[1]");
+    }
+
+    @Test
+    void concurrent_foreach_state_writes_do_not_corrupt_state() {
+        StateKey<String> KEY = StateKey.of("last", String.class);
+
+        // Each item writes its own value into shared State and immediately reads it back.
+        // With a plain HashMap this would cause ConcurrentModificationException or
+        // corrupt internal structure. ConcurrentHashMap makes it safe.
+        Step<String, String> stateWriter = Step.of("writer", String.class, String.class,
+            (s, ctx) -> {
+                ctx.state().set(KEY, s);
+                ctx.state().get(KEY); // must not throw
+                return s;
+            });
+
+        Pipeline<List<String>, List<String>> p = listPipelineConcurrent(stateWriter, 4);
+        List<String> items = List.of("a", "b", "c", "d", "e", "f", "g", "h");
+
+        for (int i = 0; i < 20; i++) {
+            Result<List<String>> r = p.execute(items);
+            assertThat(r).isInstanceOf(Success.class);
+        }
     }
 
     // ── 6.3 Build-time validation ─────────────────────────────────────────────

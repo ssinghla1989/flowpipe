@@ -31,12 +31,12 @@ public final class StateKey<T> {
     public boolean equals(Object o) {
         if (this == o) return true;
         if (!(o instanceof StateKey<?> other)) return false;
-        return name.equals(other.name);
+        return name.equals(other.name) && type.equals(other.type);
     }
 
     @Override
     public int hashCode() {
-        return name.hashCode();
+        return Objects.hash(name, type);
     }
 
     @Override
