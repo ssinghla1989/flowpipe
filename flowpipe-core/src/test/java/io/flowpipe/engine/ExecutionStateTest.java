@@ -1,6 +1,8 @@
 package io.flowpipe.engine;
 
+import io.flowpipe.api.Result;
 import io.flowpipe.api.Step;
+import io.flowpipe.api.Success;
 import io.flowpipe.state.ContextKey;
 import io.flowpipe.state.RequestContext;
 import io.flowpipe.state.State;
@@ -68,6 +70,56 @@ class ExecutionStateTest {
                 .doesNotStartWith("clear")
                 .doesNotStartWith("add");
         }
+    }
+
+    @Test
+    void state_keys_with_same_name_different_type_are_distinct() {
+        StateKey<String> stringKey = StateKey.of("value", String.class);
+        StateKey<Integer> intKey = StateKey.of("value", Integer.class);
+
+        assertThat(stringKey).isNotEqualTo(intKey);
+
+        State state = new State();
+        state.set(stringKey, "hello");
+        state.set(intKey, 42);
+
+        assertThat(state.get(stringKey)).isEqualTo("hello");
+        assertThat(state.get(intKey)).isEqualTo(42);
+    }
+
+    @Test
+    void state_keys_with_same_name_and_type_are_equal() {
+        StateKey<String> k1 = StateKey.of("name", String.class);
+        StateKey<String> k2 = StateKey.of("name", String.class);
+
+        assertThat(k1).isEqualTo(k2);
+        assertThat(k1.hashCode()).isEqualTo(k2.hashCode());
+    }
+
+    @Test
+    void context_keys_with_same_name_different_type_are_distinct() {
+        ContextKey<String> stringKey = ContextKey.of("id", String.class);
+        ContextKey<Long> longKey = ContextKey.of("id", Long.class);
+
+        assertThat(stringKey).isNotEqualTo(longKey);
+
+        RequestContext ctx = RequestContext.builder()
+            .put(stringKey, "tenant-1")
+            .put(longKey, 99L)
+            .build();
+
+        assertThat(ctx.get(stringKey)).isEqualTo("tenant-1");
+        assertThat(ctx.get(longKey)).isEqualTo(99L);
+        assertThat(ctx.size()).isEqualTo(2);
+    }
+
+    @Test
+    void context_keys_with_same_name_and_type_are_equal() {
+        ContextKey<String> k1 = ContextKey.of("traceId", String.class);
+        ContextKey<String> k2 = ContextKey.of("traceId", String.class);
+
+        assertThat(k1).isEqualTo(k2);
+        assertThat(k1.hashCode()).isEqualTo(k2.hashCode());
     }
 
     @Test
