@@ -288,6 +288,13 @@ public final class Pipeline<I, O> {
         dev.failsafe.CircuitBreaker<Object> fsCb = circuitBreakers.get(step.describe().id());
         if (fsCb != null) policies.add(fsCb);
 
+        // Declared before the retry block so the onFailedAttempt lambda can capture it.
+        // Tracks the highest attempt number for which the listener already emitted step.error,
+        // letting the catch block know whether it still needs to emit (avoids double-emit when
+        // retries are exhausted, and ensures emission when a retryOn predicate rejects an
+        // exception and Failsafe's onFailedAttempt listener is never invoked for that attempt).
+        AtomicInteger lastAttemptWithErrorEmitted = new AtomicInteger(0);
+
         if (maxAttempts > 1) {
             var retryBuilder = FailsafePolicies.toFailsafe(fpRetry);
             retryBuilder.onFailedAttempt(event -> {
@@ -300,6 +307,7 @@ public final class Pipeline<I, O> {
                     t = fe.getCause();
                 }
                 emitError(itemLabel, attempt, durationNanos, context, t);
+                lastAttemptWithErrorEmitted.set(attempt);
             });
             retryBuilder.onRetryScheduled(event -> {
                 int attempt = event.getAttemptCount();  // already 1-indexed in event listeners
@@ -350,12 +358,13 @@ public final class Pipeline<I, O> {
                 new TraceEntry(itemLabel, totalStartNanos, durationNanos, 1, false));
 
         } catch (TimeoutExceededException tee) {
-            // Thrown when no retry is configured, or when all retry attempts timed out.
-            // When maxAttempts > 1, onFailedAttempt already emitted step.error per attempt.
             long durationNanos = System.nanoTime() - totalStartNanos;
             int attempt = lastAttempt.get();
             StepTimeoutException ste = new StepTimeoutException(itemLabel, timeoutMs);
-            if (maxAttempts <= 1) emitError(itemLabel, attempt, durationNanos, context, ste);
+            // Emit step.error only if the retry listener hasn't already emitted for this attempt.
+            if (lastAttemptWithErrorEmitted.get() < attempt) {
+                emitError(itemLabel, attempt, durationNanos, context, ste);
+            }
             emitRecord(recorder, itemLabel, durationNanos, attempt, StepOutcome.FAILURE);
             safeFinishSpan(spanRecorder, span, StepOutcome.FAILURE, ste);
             return new ItemFailure(ste, itemLabel,
@@ -368,8 +377,13 @@ public final class Pipeline<I, O> {
             if (cause instanceof InterruptedException) Thread.currentThread().interrupt();
             long durationNanos = System.nanoTime() - totalStartNanos;
             int attempt = lastAttempt.get();
-            // When maxAttempts > 1, onFailedAttempt already emitted step.error for every attempt.
-            if (maxAttempts <= 1) emitError(itemLabel, attempt, durationNanos, context, cause);
+            // Emit step.error only if the retry listener hasn't already emitted for this attempt.
+            // This covers: single-attempt fast path, retryOn predicate rejection (listener never
+            // fires for the rejected exception), and the final attempt when retries are exhausted
+            // (listener already emitted, so we skip here to avoid duplication).
+            if (lastAttemptWithErrorEmitted.get() < attempt) {
+                emitError(itemLabel, attempt, durationNanos, context, cause);
+            }
             emitRecord(recorder, itemLabel, durationNanos, attempt, StepOutcome.FAILURE);
             safeFinishSpan(spanRecorder, span, StepOutcome.FAILURE, cause);
             return new ItemFailure(cause, itemLabel,

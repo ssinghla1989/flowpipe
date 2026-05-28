@@ -9,6 +9,7 @@ import io.flowpipe.api.TimeoutPolicy;
 
 import java.time.Duration;
 import java.time.temporal.ChronoUnit;
+import java.util.function.Predicate;
 
 // Translates FlowPipe policy value types to Failsafe 3.x policy objects.
 // Failsafe types are never exposed beyond io.flowpipe.engine.
@@ -47,6 +48,14 @@ final class FailsafePolicies {
             // FlowPipe's original semantics were uniform(0, delay); no test asserts the exact
             // distribution, so Failsafe's built-in jitter is an acceptable substitution.
             builder.withJitter(0.5);
+        }
+
+        // When a retryOn predicate is set, tell Failsafe only to handle exceptions that pass it.
+        // Exceptions that fail the predicate are not retried — they propagate immediately.
+        // Without this, Failsafe's default is to handle (and retry on) any exception.
+        Predicate<Throwable> pred = fp.retryPredicate();
+        if (pred != null) {
+            builder.handleIf((result, throwable) -> throwable != null && pred.test(throwable));
         }
 
         return builder;

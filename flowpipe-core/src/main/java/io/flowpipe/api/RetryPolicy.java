@@ -1,6 +1,7 @@
 package io.flowpipe.api;
 
 import java.util.Objects;
+import java.util.function.Predicate;
 
 public final class RetryPolicy {
 
@@ -8,8 +9,11 @@ public final class RetryPolicy {
     private final long initialDelayMs;
     private final double multiplier;
     private final boolean jitter;
+    // null means "retry on any throwable" (default Failsafe behaviour)
+    private final Predicate<Throwable> retryPredicate;
 
-    private RetryPolicy(int maxAttempts, long initialDelayMs, double multiplier, boolean jitter) {
+    private RetryPolicy(int maxAttempts, long initialDelayMs, double multiplier, boolean jitter,
+                        Predicate<Throwable> retryPredicate) {
         if (maxAttempts < 1) {
             throw new IllegalArgumentException("maxAttempts must be >= 1, got: " + maxAttempts);
         }
@@ -23,18 +27,39 @@ public final class RetryPolicy {
         this.initialDelayMs = initialDelayMs;
         this.multiplier = multiplier;
         this.jitter = jitter;
+        this.retryPredicate = retryPredicate;
     }
 
     public static RetryPolicy none() {
-        return new RetryPolicy(1, 0L, 1.0, false);
+        return new RetryPolicy(1, 0L, 1.0, false, null);
     }
 
     public static RetryPolicy fixed(int maxAttempts, long delayMs) {
-        return new RetryPolicy(maxAttempts, delayMs, 1.0, false);
+        return new RetryPolicy(maxAttempts, delayMs, 1.0, false, null);
     }
 
     public static RetryPolicy exponential(int maxAttempts, long initialDelayMs, double multiplier, boolean jitter) {
-        return new RetryPolicy(maxAttempts, initialDelayMs, multiplier, jitter);
+        return new RetryPolicy(maxAttempts, initialDelayMs, multiplier, jitter, null);
+    }
+
+    /**
+     * Returns a new {@code RetryPolicy} that only retries when {@code predicate} returns
+     * {@code true} for the thrown exception. When the predicate returns {@code false}, the
+     * exception propagates immediately — no further attempts are made and the pipeline
+     * produces a {@link Failure} with that exception as the cause.
+     *
+     * <p>The predicate is evaluated on the raw throwable before any Failsafe unwrapping.
+     * Both checked and unchecked exceptions are passed to the predicate as-is.
+     *
+     * <p>By default (when this method is not called), the policy retries on any
+     * {@link Throwable}.</p>
+     *
+     * @param predicate returns {@code true} if the exception warrants a retry
+     * @return a new {@code RetryPolicy} with the predicate applied; the original is unchanged
+     */
+    public RetryPolicy retryOn(Predicate<Throwable> predicate) {
+        Objects.requireNonNull(predicate, "predicate");
+        return new RetryPolicy(maxAttempts, initialDelayMs, multiplier, jitter, predicate);
     }
 
     public int maxAttempts() {
@@ -53,10 +78,19 @@ public final class RetryPolicy {
         return jitter;
     }
 
+    /**
+     * Returns the predicate that gates retries, or {@code null} if the policy retries on
+     * any throwable (the default).
+     */
+    public Predicate<Throwable> retryPredicate() {
+        return retryPredicate;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
         if (!(o instanceof RetryPolicy r)) return false;
+        // retryPredicate excluded: lambdas have no value equality
         return maxAttempts == r.maxAttempts
             && initialDelayMs == r.initialDelayMs
             && Double.compare(multiplier, r.multiplier) == 0
@@ -71,6 +105,7 @@ public final class RetryPolicy {
     @Override
     public String toString() {
         return "RetryPolicy{maxAttempts=" + maxAttempts + ", initialDelayMs=" + initialDelayMs
-            + ", multiplier=" + multiplier + ", jitter=" + jitter + "}";
+            + ", multiplier=" + multiplier + ", jitter=" + jitter
+            + ", retryPredicate=" + (retryPredicate == null ? "any" : "custom") + "}";
     }
 }

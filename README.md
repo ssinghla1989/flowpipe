@@ -467,7 +467,37 @@ StepDescriptor<Order, PaymentResult> desc = StepDescriptor
 | `RetryPolicy.fixed(attempts, delayMs)` | Constant delay between attempts |
 | `RetryPolicy.exponential(attempts, initialMs, multiplier, jitter)` | Delay grows by `multiplier` each attempt; `jitter=true` adds randomness to avoid thundering herd |
 
-A `step.retry` log event is emitted at `WARN` level before each retry attempt, carrying `step.id`, `step.attempt`, `step.max_attempts`, and `step.delay_ms`. Metrics are recorded once for the final outcome, not per attempt.
+### Selective retry with `.retryOn(Predicate<Throwable>)`
+
+By default a `RetryPolicy` retries on any exception. Use `.retryOn(predicate)` to restrict retries to exceptions that match a condition — non-matching exceptions propagate immediately without consuming any remaining attempts.
+
+```java
+import java.io.IOException;
+import java.net.SocketTimeoutException;
+
+RetryPolicy policy = RetryPolicy.exponential(3, 100, 2.0, false)
+    .retryOn(e -> e instanceof IOException);  // only retry I/O failures
+
+// Combine multiple types:
+RetryPolicy policy2 = RetryPolicy.fixed(3, 50)
+    .retryOn(e -> e instanceof IOException || e instanceof SocketTimeoutException);
+
+// Exclude specific subtypes:
+RetryPolicy policy3 = RetryPolicy.fixed(3, 0)
+    .retryOn(e -> e instanceof IOException && !(e instanceof java.net.UnknownHostException));
+```
+
+When the predicate returns `false`, the exception propagates immediately as `Failure.cause()` — no further attempts are made and the step is not retried. When it returns `true`, normal retry-with-backoff logic applies.
+
+`.retryOn()` returns a new `RetryPolicy` instance; the original is unchanged (immutable).
+
+```java
+RetryPolicy base    = RetryPolicy.fixed(3, 100);  // retries on any exception
+RetryPolicy ioOnly  = base.retryOn(e -> e instanceof IOException);  // new instance
+// base is still "retry on any exception"
+```
+
+A `step.retry` log event is emitted at `WARN` level before each retry attempt, carrying `step.id`, `step.attempt`, `step.max_attempts`, and `step.delay_ms`. A `step.error` log event is emitted for every failed attempt — including attempts where the predicate rejected the exception (so observability is never silently dropped). Metrics are recorded once for the final outcome, not per attempt.
 
 ---
 
