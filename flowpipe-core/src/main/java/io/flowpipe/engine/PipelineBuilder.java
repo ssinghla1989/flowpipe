@@ -258,6 +258,32 @@ public final class PipelineBuilder<I, O> {
         return new PipelineBuilder<>(inputType, resultType, nodes, metricsRecorder, spanRecorder, executor, castLifecycle(lifecycle), deadlineMs);
     }
 
+    /**
+     * Single-armed branch: if the predicate is true, routes to {@code ifTrue}; otherwise the
+     * current pipeline value passes through unchanged (the false arm is a transparent identity).
+     *
+     * <p>Because the false arm is a pass-through, the ifTrue pipeline must accept and return the
+     * same type — {@code Pipeline<O, O>}. The output type of the builder is therefore unchanged.
+     *
+     * <p>The pass-through arm appears in the {@link io.flowpipe.api.ExecutionTrace} as a skipped
+     * step when the true arm is taken, and as a normal step (with no-op semantics) when the
+     * predicate is false.
+     */
+    public PipelineBuilder<I, O> branch(
+            String branchId,
+            BiPredicate<O, StepContext> predicate,
+            Pipeline<O, O> ifTrue) {
+        Objects.requireNonNull(branchId, "branchId");
+        Objects.requireNonNull(predicate, "predicate");
+        Objects.requireNonNull(ifTrue, "ifTrue");
+        Step<O, O> passThrough = Step.of(
+            branchId + ".pass-through", currentOutputType, currentOutputType, (v, ctx) -> v);
+        Pipeline<O, O> passThroughPipeline = PipelineBuilder.start(currentOutputType)
+            .then(passThrough)
+            .build();
+        return branch(branchId, predicate, ifTrue, passThroughPipeline);
+    }
+
     @SuppressWarnings({"unchecked", "rawtypes"})
     public <R> PipelineBuilder<I, R> branch(
             String branchId,

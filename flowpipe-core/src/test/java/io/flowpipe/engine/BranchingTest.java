@@ -414,4 +414,119 @@ class BranchingTest {
         assertThat(failure.failedStepId()).isEqualTo("explode");
         assertThat(failure.cause()).isSameAs(boom);
     }
+
+    // =========================================================================
+    // Single-armed branch (pass-through false arm)
+    // =========================================================================
+
+    private static Pipeline<Integer, Integer> doubleArm() {
+        return PipelineBuilder.start(Integer.class)
+            .then(Step.of("double", Integer.class, Integer.class, (i, ctx) -> i * 2))
+            .build();
+    }
+
+    // -------------------------------------------------------------------------
+    // 5.17 single-armed branch: true predicate executes ifTrue arm
+    // -------------------------------------------------------------------------
+
+    @Test
+    void single_arm_branch_true_predicate_executes_arm() {
+        Pipeline<Integer, Integer> pipeline = PipelineBuilder.start(Integer.class)
+            .branch("maybe-double", (val, ctx) -> val > 0, doubleArm())
+            .build();
+
+        Result<Integer> result = pipeline.execute(5);
+        assertThat(result).isInstanceOf(Success.class);
+        assertThat(((Success<Integer>) result).value()).isEqualTo(10);
+    }
+
+    // -------------------------------------------------------------------------
+    // 5.18 single-armed branch: false predicate passes input through unchanged
+    // -------------------------------------------------------------------------
+
+    @Test
+    void single_arm_branch_false_predicate_passes_through_unchanged() {
+        Pipeline<Integer, Integer> pipeline = PipelineBuilder.start(Integer.class)
+            .branch("maybe-double", (val, ctx) -> val > 0, doubleArm())
+            .build();
+
+        Result<Integer> result = pipeline.execute(-3);
+        assertThat(result).isInstanceOf(Success.class);
+        assertThat(((Success<Integer>) result).value()).isEqualTo(-3); // unchanged
+    }
+
+    // -------------------------------------------------------------------------
+    // 5.19 single-armed branch: output type is same as input type (no type change)
+    // -------------------------------------------------------------------------
+
+    @Test
+    void single_arm_branch_output_type_equals_input_type() {
+        Pipeline<Integer, Integer> pipeline = PipelineBuilder.start(Integer.class)
+            .branch("maybe-double", (val, ctx) -> true, doubleArm())
+            .build();
+
+        assertThat(pipeline.inputType()).isEqualTo(Integer.class);
+        assertThat(pipeline.outputType()).isEqualTo(Integer.class);
+    }
+
+    // -------------------------------------------------------------------------
+    // 5.20 single-armed branch can be chained with further steps
+    // -------------------------------------------------------------------------
+
+    @Test
+    void single_arm_branch_can_be_chained_with_further_steps() {
+        Step<Integer, String> render = Step.of("render", Integer.class, String.class,
+            (i, ctx) -> "value=" + i);
+
+        Pipeline<Integer, String> pipeline = PipelineBuilder.start(Integer.class)
+            .branch("guard", (val, ctx) -> val > 100, doubleArm())
+            .then(render)
+            .build();
+
+        // Predicate false — input passes through, render sees original value
+        assertThat(((Success<String>) pipeline.execute(5)).value()).isEqualTo("value=5");
+        // Predicate true — arm doubles it, render sees doubled value
+        assertThat(((Success<String>) pipeline.execute(200)).value()).isEqualTo("value=400");
+    }
+
+    // -------------------------------------------------------------------------
+    // 5.21 single-armed branch: pass-through appears as skipped when arm is taken
+    // -------------------------------------------------------------------------
+
+    @Test
+    void single_arm_branch_pass_through_appears_skipped_when_arm_taken() {
+        Pipeline<Integer, Integer> pipeline = PipelineBuilder.start(Integer.class)
+            .branch("maybe-double", (val, ctx) -> val > 0, doubleArm())
+            .build();
+
+        Success<Integer> success = (Success<Integer>) pipeline.execute(5);
+
+        // Trace: branch node, "double" (taken), "maybe-double.pass-through" (skipped)
+        List<TraceEntry> entries = success.trace().entries();
+        assertThat(entries).extracting(TraceEntry::stepId)
+            .containsExactly("maybe-double", "double", "maybe-double.pass-through");
+
+        TraceEntry skipped = entries.stream()
+            .filter(e -> e.stepId().equals("maybe-double.pass-through"))
+            .findFirst().orElseThrow();
+        assertThat(skipped.skipped()).isTrue();
+    }
+
+    // -------------------------------------------------------------------------
+    // 5.22 single-armed branch: throwing predicate produces Failure with branchId
+    // -------------------------------------------------------------------------
+
+    @Test
+    void single_arm_branch_throwing_predicate_produces_failure_with_branch_id() {
+        Pipeline<Integer, Integer> pipeline = PipelineBuilder.start(Integer.class)
+            .branch("guard",
+                (val, ctx) -> { throw new IllegalStateException("predicate blew up"); },
+                doubleArm())
+            .build();
+
+        Result<Integer> result = pipeline.execute(1);
+        assertThat(result).isInstanceOf(Failure.class);
+        assertThat(((Failure<Integer>) result).failedStepId()).isEqualTo("guard");
+        assertThat(((Failure<Integer>) result).cause()).hasMessage("predicate blew up");
+    }
 }

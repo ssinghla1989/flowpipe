@@ -490,6 +490,27 @@ Pipeline<Order, OrderResult> pipeline = PipelineBuilder.start(Order.class)
 
 The skipped arm's steps appear in the `ExecutionTrace` as skipped entries. The predicate receives the full `StepContext` so it can read `State` or `RequestContext` if needed.
 
+### Single-armed branch — optional transformation
+
+When you only need "do something if condition is true; otherwise pass through unchanged," use the three-argument overload that omits the false arm:
+
+```java
+Pipeline<Order, Order> premiumPipeline = PipelineBuilder.start(Order.class)
+    .then(applyDiscountStep)
+    .build();
+
+Pipeline<Order, OrderResult> pipeline = PipelineBuilder.start(Order.class)
+    .branch(
+        "premium-discount",
+        (order, ctx) -> order.isPremiumCustomer(),  // BiPredicate<O, StepContext>
+        premiumPipeline)                             // ifTrue arm — Pipeline<O, O>
+    // no ifFalse needed — non-premium orders pass through unchanged
+    .then(chargeStep)
+    .build();
+```
+
+Because the false arm is an implicit identity pass-through, the `ifTrue` pipeline must return the same type it receives (`Pipeline<O, O>`). The output type of the builder stays `O` — subsequent steps see no type change regardless of which path ran.
+
 ---
 
 ## Foreach fan-out
