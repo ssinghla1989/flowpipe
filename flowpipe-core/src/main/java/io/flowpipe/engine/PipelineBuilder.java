@@ -78,6 +78,83 @@ public final class PipelineBuilder<I, O> {
             castLifecycle(lifecycle), deadlineMs);
     }
 
+    /**
+     * Runs {@code stepA} and {@code stepB} in parallel; each branch's output is automatically
+     * written to state via its declared {@link io.flowpipe.api.StepDescriptor#outputKey()}.
+     * The current pipeline value passes through unchanged to the next step.
+     *
+     * <p>Both branches <em>must</em> declare {@code withOutputKey(...)} on their
+     * {@link io.flowpipe.api.StepDescriptor}; {@link Pipeline#build()} enforces this.
+     */
+    public PipelineBuilder<I, O> parallel2(Step<O, ?> stepA, Step<O, ?> stepB) {
+        ensureUsable();
+        Objects.requireNonNull(stepA, "stepA");
+        Objects.requireNonNull(stepB, "stepB");
+        List<Step<O, ?>> branches = List.of(stepA, stepB);
+        Function<List<Object>, O> noCombiner = null;
+        nodes.add(new ParallelNode<>(branches, noCombiner, null));
+        consumed = true;
+        return new PipelineBuilder<>(inputType, currentOutputType, nodes, metricsRecorder, spanRecorder, executor, castLifecycle(lifecycle), deadlineMs);
+    }
+
+    /**
+     * Runs {@code stepA}, {@code stepB}, and {@code stepC} in parallel; each branch's output is
+     * automatically written to state via its declared {@link io.flowpipe.api.StepDescriptor#outputKey()}.
+     * The current pipeline value passes through unchanged to the next step.
+     *
+     * <p>All branches <em>must</em> declare {@code withOutputKey(...)}; {@link Pipeline#build()} enforces this.
+     */
+    public PipelineBuilder<I, O> parallel3(Step<O, ?> stepA, Step<O, ?> stepB, Step<O, ?> stepC) {
+        ensureUsable();
+        Objects.requireNonNull(stepA, "stepA");
+        Objects.requireNonNull(stepB, "stepB");
+        Objects.requireNonNull(stepC, "stepC");
+        List<Step<O, ?>> branches = List.of(stepA, stepB, stepC);
+        Function<List<Object>, O> noCombiner = null;
+        nodes.add(new ParallelNode<>(branches, noCombiner, null));
+        consumed = true;
+        return new PipelineBuilder<>(inputType, currentOutputType, nodes, metricsRecorder, spanRecorder, executor, castLifecycle(lifecycle), deadlineMs);
+    }
+
+    /**
+     * Runs all four steps in parallel; each branch's output is automatically written to state via
+     * its declared {@link io.flowpipe.api.StepDescriptor#outputKey()}.
+     * The current pipeline value passes through unchanged to the next step.
+     *
+     * <p>All branches <em>must</em> declare {@code withOutputKey(...)}; {@link Pipeline#build()} enforces this.
+     */
+    public PipelineBuilder<I, O> parallel4(
+            Step<O, ?> stepA, Step<O, ?> stepB, Step<O, ?> stepC, Step<O, ?> stepD) {
+        ensureUsable();
+        Objects.requireNonNull(stepA, "stepA");
+        Objects.requireNonNull(stepB, "stepB");
+        Objects.requireNonNull(stepC, "stepC");
+        Objects.requireNonNull(stepD, "stepD");
+        List<Step<O, ?>> branches = List.of(stepA, stepB, stepC, stepD);
+        Function<List<Object>, O> noCombiner = null;
+        nodes.add(new ParallelNode<>(branches, noCombiner, null));
+        consumed = true;
+        return new PipelineBuilder<>(inputType, currentOutputType, nodes, metricsRecorder, spanRecorder, executor, castLifecycle(lifecycle), deadlineMs);
+    }
+
+    /**
+     * Runs all steps in {@code steps} in parallel; each branch's output is automatically written
+     * to state via its declared {@link io.flowpipe.api.StepDescriptor#outputKey()}.
+     * The current pipeline value passes through unchanged to the next step.
+     *
+     * <p>All branches <em>must</em> declare {@code withOutputKey(...)}; {@link Pipeline#build()} enforces this.
+     * At least 2 steps are required.
+     */
+    public PipelineBuilder<I, O> parallelN(List<Step<O, ?>> steps) {
+        ensureUsable();
+        Objects.requireNonNull(steps, "steps");
+        List<Step<O, ?>> branches = List.copyOf(steps);  // throws NPE if any element is null
+        Function<List<Object>, O> noCombiner = null;
+        nodes.add(new ParallelNode<>(branches, noCombiner, null));
+        consumed = true;
+        return new PipelineBuilder<>(inputType, currentOutputType, nodes, metricsRecorder, spanRecorder, executor, castLifecycle(lifecycle), deadlineMs);
+    }
+
     public <A, B, R> PipelineBuilder<I, R> parallel2(
             Class<R> resultType,
             BiFunction<A, B, R> combiner,
@@ -360,6 +437,9 @@ public final class PipelineBuilder<I, O> {
                         "A parallel block requires at least 2 branches, but found " + pn.branches().size());
                 }
                 validateParallelNKeys(pn);
+                if (pn.combiner() == null) {
+                    validateCombinerFreeOutputKeys(pn);
+                }
             }
         }
     }
@@ -389,6 +469,20 @@ public final class PipelineBuilder<I, O> {
             if (!seenIds.add(id)) {
                 duplicates.add(id);
             }
+        }
+    }
+
+    private static void validateCombinerFreeOutputKeys(ParallelNode<?, ?> pn) {
+        var missing = new java.util.ArrayList<String>();
+        for (Step<?, ?> branch : pn.branches()) {
+            if (branch.describe().outputKey() == null) {
+                missing.add(branch.describe().id());
+            }
+        }
+        if (!missing.isEmpty()) {
+            throw new PipelineBuildException(
+                "Combiner-free parallel requires all branches to declare withOutputKey(...), "
+                    + "but the following branches are missing it: " + missing);
         }
     }
 
