@@ -25,6 +25,7 @@ import io.flowpipe.observability.SpanRecorder;
 import io.flowpipe.observability.StepOutcome;
 import io.flowpipe.state.RequestContext;
 import io.flowpipe.state.State;
+import io.flowpipe.state.StateKey;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.spi.LoggingEventBuilder;
@@ -525,7 +526,9 @@ public final class Pipeline<I, O> {
             outputs.add(((ItemSuccess) result).value());
         }
 
-        Object combined = pn.combiner().apply(outputs);
+        // combiner-free parallel: outputs already written to state via each branch's outputKey;
+        // the input passes through unchanged as the next pipeline value
+        Object combined = (pn.combiner() != null) ? pn.combiner().apply(outputs) : input;
         return new ParallelSuccess(combined);
     }
 
@@ -614,6 +617,10 @@ public final class Pipeline<I, O> {
                 "Step '" + step.describe().id() + "' returned null; step outputs must not be null");
         }
         step.describe().outputValidator().validate(output);
+        StateKey outputKey = step.describe().outputKey();
+        if (outputKey != null) {
+            ctx.state().set(outputKey, output);
+        }
         return output;
     }
 

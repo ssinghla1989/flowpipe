@@ -1,5 +1,6 @@
 package io.flowpipe.api;
 
+import io.flowpipe.state.StateKey;
 import io.flowpipe.validation.NoOpValidator;
 import io.flowpipe.validation.Validator;
 
@@ -13,7 +14,8 @@ public record StepDescriptor<I, O>(
     Validator<O> outputValidator,
     RetryPolicy retryPolicy,
     TimeoutPolicy timeoutPolicy,
-    CircuitBreakerPolicy circuitBreakerPolicy  // nullable; null means no circuit breaker active
+    CircuitBreakerPolicy circuitBreakerPolicy,  // nullable; null means no circuit breaker active
+    StateKey<O> outputKey                        // nullable; non-null means auto-write output to state after execution
 ) {
 
     public StepDescriptor {
@@ -24,7 +26,7 @@ public record StepDescriptor<I, O>(
         Objects.requireNonNull(outputValidator, "outputValidator");
         Objects.requireNonNull(retryPolicy, "retryPolicy");
         Objects.requireNonNull(timeoutPolicy, "timeoutPolicy");
-        // circuitBreakerPolicy is intentionally nullable
+        // circuitBreakerPolicy and outputKey are intentionally nullable
         if (id.isEmpty()) {
             throw new IllegalArgumentException("StepDescriptor id must not be empty");
         }
@@ -33,19 +35,25 @@ public record StepDescriptor<I, O>(
     public StepDescriptor<I, O> withRetry(RetryPolicy policy) {
         Objects.requireNonNull(policy, "policy");
         return new StepDescriptor<>(id, inputType, outputType, inputValidator, outputValidator,
-            policy, timeoutPolicy, circuitBreakerPolicy);
+            policy, timeoutPolicy, circuitBreakerPolicy, outputKey);
     }
 
     public StepDescriptor<I, O> withTimeout(TimeoutPolicy policy) {
         Objects.requireNonNull(policy, "policy");
         return new StepDescriptor<>(id, inputType, outputType, inputValidator, outputValidator,
-            retryPolicy, policy, circuitBreakerPolicy);
+            retryPolicy, policy, circuitBreakerPolicy, outputKey);
     }
 
     public StepDescriptor<I, O> withCircuitBreaker(CircuitBreakerPolicy policy) {
         Objects.requireNonNull(policy, "policy");
         return new StepDescriptor<>(id, inputType, outputType, inputValidator, outputValidator,
-            retryPolicy, timeoutPolicy, policy);
+            retryPolicy, timeoutPolicy, policy, outputKey);
+    }
+
+    public StepDescriptor<I, O> withOutputKey(StateKey<O> key) {
+        Objects.requireNonNull(key, "key");
+        return new StepDescriptor<>(id, inputType, outputType, inputValidator, outputValidator,
+            retryPolicy, timeoutPolicy, circuitBreakerPolicy, key);
     }
 
     public static <I, O> Builder<I, O> builder(String id, Class<I> inputType, Class<O> outputType) {
@@ -61,6 +69,7 @@ public record StepDescriptor<I, O>(
         private RetryPolicy retryPolicy = RetryPolicy.none();
         private TimeoutPolicy timeoutPolicy = TimeoutPolicy.none();
         private CircuitBreakerPolicy circuitBreakerPolicy = null;
+        private StateKey<O> outputKey = null;
 
         private Builder(String id, Class<I> inputType, Class<O> outputType) {
             this.id = id;
@@ -93,9 +102,14 @@ public record StepDescriptor<I, O>(
             return this;
         }
 
+        public Builder<I, O> withOutputKey(StateKey<O> key) {
+            this.outputKey = Objects.requireNonNull(key, "key");
+            return this;
+        }
+
         public StepDescriptor<I, O> build() {
             return new StepDescriptor<>(id, inputType, outputType, inputValidator, outputValidator,
-                retryPolicy, timeoutPolicy, circuitBreakerPolicy);
+                retryPolicy, timeoutPolicy, circuitBreakerPolicy, outputKey);
         }
     }
 }
