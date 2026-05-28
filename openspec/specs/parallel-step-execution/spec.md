@@ -70,6 +70,29 @@ The engine SHALL use the `ExecutorService` supplied by the caller (or `ForkJoinP
 - **WHEN** a pipeline is built with a custom executor that has been shut down, and a parallel block is executed
 - **THEN** the result MUST be a `Failure` and the pipeline execution MUST return normally (no unchecked exception propagates out of `Pipeline.execute(...)`)
 
+### Requirement: Resilience policies on parallel branch steps are honored
+
+`RetryPolicy`, `TimeoutPolicy`, and `CircuitBreakerPolicy` attached to a parallel branch step's `StepDescriptor` SHALL be applied to that branch's execution exactly as they would be for a sequential step. The engine SHALL NOT treat parallel branches as a special case that bypasses resilience machinery.
+
+#### Scenario: Retry policy on a parallel branch step recovers a transient failure
+
+- **WHEN** a parallel branch step has a `RetryPolicy` with `maxAttempts=3` and its `execute` method fails on the first two calls then succeeds on the third
+- **THEN** the branch MUST produce a successful result after 3 invocations, and the combined parallel block output MUST reflect the successful branch output
+
+#### Scenario: Circuit breaker on a parallel branch step fast-fails when open
+
+- **WHEN** a parallel branch step has a `CircuitBreakerPolicy` and the circuit has been opened by prior failures
+- **THEN** the branch MUST fast-fail with `CircuitBreakerOpenException` without invoking `execute`, and the parallel block MUST return a `Failure`
+
+### Requirement: Pipeline deadline is enforced while waiting for parallel branch futures
+
+If the pipeline has a configured deadline, the engine SHALL enforce it while collecting parallel branch results. The engine SHALL NOT block indefinitely on a slow branch when the deadline has passed.
+
+#### Scenario: Slow parallel branch does not block past the pipeline deadline
+
+- **WHEN** a pipeline with a deadline has a parallel block where one branch sleeps significantly longer than the deadline
+- **THEN** the pipeline MUST return a `Failure` with `cause()` instanceof `PipelineDeadlineExceededException` and `failedStepId()` equal to `"pipeline.deadline"` without waiting for the slow branch to finish
+
 ### Requirement: parallelN provides a variadic escape hatch for arities above 4
 
 The builder SHALL expose a `parallelN(Class<R> resultType, Map<String, Step<I, ?>> steps, Function<Map<String, Object>, R> combiner)` method. The map keys MUST match the corresponding step's `StepDescriptor.id()`; if any key does not match, `build()` SHALL throw `PipelineBuildException`. The combiner receives a `Map<String, Object>` keyed by step id with each branch's output as the value.
