@@ -14,6 +14,7 @@ import io.flowpipe.api.PipelineLifecycle;
 import io.flowpipe.api.Result;
 import io.flowpipe.api.RetryPolicy;
 import io.flowpipe.api.Step;
+import io.flowpipe.api.StepContext;
 import io.flowpipe.api.StepDescriptor;
 import io.flowpipe.api.StepTimeoutException;
 import io.flowpipe.api.TraceEntry;
@@ -73,6 +74,63 @@ public final class Pipeline<I, O> {
         this.lifecycle = lifecycle;
         this.circuitBreakers = circuitBreakers;
         this.deadlineMs = deadlineMs;
+    }
+
+    /**
+     * Adapts this pipeline into a {@link Step} so it can be composed inside another pipeline via
+     * {@code .then()}, {@code .foreach()}, {@code .parallel2/3/4/N()}, or {@code .branch()}.
+     *
+     * <p>When the adapter step executes:
+     * <ul>
+     *   <li>The outer pipeline's {@link io.flowpipe.state.RequestContext} is forwarded into the
+     *       inner pipeline execution — tenant ids, trace ids, and any other context keys propagate
+     *       transparently.</li>
+     *   <li>The inner pipeline creates its own isolated {@link io.flowpipe.state.State}, independent
+     *       of the outer pipeline's state.</li>
+     *   <li>The inner pipeline's configured {@link MetricsRecorder} and {@link SpanRecorder} record
+     *       inner-step observability; the outer pipeline records a single start/finish event for
+     *       the adapter step itself.</li>
+     *   <li>The inner pipeline's {@link io.flowpipe.api.ExecutionTrace} is separate; the outer
+     *       trace contains one entry for the adapter step, not individual inner steps.</li>
+     * </ul>
+     *
+     * <p>If the inner pipeline produces a {@link Failure}, its {@link Failure#cause()} is rethrown
+     * so the outer pipeline surfaces a {@link Failure} whose {@code failedStepId()} is {@code id}
+     * (the adapter step's id) and whose {@code cause()} is the original inner exception.
+     *
+     * <p>Resilience policies ({@link io.flowpipe.api.RetryPolicy}, {@link io.flowpipe.api.TimeoutPolicy},
+     * {@link io.flowpipe.api.CircuitBreakerPolicy}) can be attached to the adapter step by wrapping
+     * the returned step in a custom {@link StepDescriptor}. These policies wrap the <em>entire</em>
+     * inner pipeline invocation — a retry retries the whole inner pipeline, not individual inner steps.
+     *
+     * @param id the step id for this adapter as seen by the outer pipeline; must be unique within
+     *           that pipeline
+     * @return a {@link Step} that delegates {@code execute()} to this pipeline
+     */
+    public Step<I, O> asStep(String id) {
+        Objects.requireNonNull(id, "id");
+        Pipeline<I, O> self = this;
+        StepDescriptor<I, O> descriptor = StepDescriptor.builder(id, inputType, outputType).build();
+        return new Step<>() {
+            @Override
+            public StepDescriptor<I, O> describe() {
+                return descriptor;
+            }
+
+            @Override
+            public O execute(I input, StepContext ctx) throws Exception {
+                Result<O> result = self.execute(input, ctx.context());
+                if (result instanceof Success<O> s) {
+                    return s.value();
+                }
+                @SuppressWarnings("unchecked")
+                Failure<O> failure = (Failure<O>) result;
+                Throwable cause = failure.cause();
+                if (cause instanceof Exception e) throw e;
+                // Errors (e.g. AssertionError) must be wrapped since execute() declares throws Exception
+                throw new RuntimeException(cause);
+            }
+        };
     }
 
     public Class<I> inputType() {

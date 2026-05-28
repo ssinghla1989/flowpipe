@@ -99,6 +99,120 @@ Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
 
 `RetryPolicy`, `TimeoutPolicy`, and `CircuitBreakerPolicy` attached to a parallel branch step's `StepDescriptor` are fully honored — the branch runs through the same retry/timeout/circuit-breaker machinery as sequential steps. A retry configured on a parallel branch retries within that branch's executor thread, transparent to the rest of the pipeline.
 
+## Pipeline composition
+
+`Pipeline.asStep(String id)` turns any `Pipeline<I,O>` into a `Step<I,O>`, enabling pipelines to be nested inside other pipelines anywhere a step is accepted — `.then()`, `.foreach()`, `.parallel2/3/4/N()`, and `.branch()`.
+
+### Basic nesting with `.then()`
+
+```java
+// Inner pipeline: parse a string, then double the integer
+Step<String, Integer> parse = Step.of("parse", String.class, Integer.class,
+    (s, ctx) -> Integer.parseInt(s));
+Step<Integer, Integer> doubler = Step.of("double", Integer.class, Integer.class,
+    (n, ctx) -> n * 2);
+
+Pipeline<String, Integer> inner = PipelineBuilder.start(String.class)
+    .then(parse)
+    .then(doubler)
+    .build();
+
+// Outer pipeline: run inner, then add 10
+Pipeline<String, Integer> outer = PipelineBuilder.start(String.class)
+    .then(inner.asStep("transform"))   // "transform" is the step id as seen by the outer pipeline
+    .then(addTenStep)
+    .build();
+
+// execute("5") → inner produces 10, outer produces 20
+```
+
+The string passed to `asStep()` is the step id the outer pipeline uses for logging, metrics, and the `ExecutionTrace`. Inner step ids never appear in the outer trace — each pipeline maintains its own trace.
+
+### Scatter-gather with `.foreach()`
+
+The primary Mastra pattern for multi-step fan-out: apply a full sub-pipeline to every element of a list.
+
+```java
+// Inner pipeline: trim whitespace, then uppercase
+Pipeline<String, String> enrich = PipelineBuilder.start(String.class)
+    .then(trimStep)
+    .then(upperStep)
+    .build();
+
+// Outer pipeline: split input into a list, then enrich each element
+Pipeline<String, List<String>> outer = PipelineBuilder.start(String.class)
+    .then(splitStep)                  // Step<String, List<String>>
+    .foreach(enrich.asStep("enrich")) // applies the two-step inner pipeline per element
+    .build();
+
+// execute(" hello , world ") → ["HELLO", "WORLD"]
+```
+
+`foreach(step, N)` with `N > 1` runs elements concurrently in windows of `N`, using the pipeline's executor.
+
+### Parallel branches
+
+```java
+// Two inner pipelines running concurrently on the same input
+Pipeline<String, String> wordStats = PipelineBuilder.start(String.class)
+    .then(wordCountStep)
+    .then(formatStep)
+    .build();
+
+Pipeline<String, String> outer = PipelineBuilder.start(String.class)
+    .parallel2(
+        String.class,
+        (wordResult, charCount) -> wordResult + " chars=" + charCount,
+        wordStats.asStep("word-stats"),  // runs a full inner pipeline as a branch
+        charCountStep)
+    .build();
+```
+
+### Failure propagation
+
+When the inner pipeline fails, the original exception becomes `Failure.cause()` in the outer pipeline. The `failedStepId()` is the adapter step's id (e.g. `"transform"`), not the id of the inner step that actually threw. This keeps the outer pipeline's failure reporting stable regardless of what's inside the inner pipeline.
+
+```java
+Result<Integer> result = outer.execute("not-a-number");
+if (result instanceof Failure<Integer> f) {
+    f.failedStepId(); // "transform" — the adapter step id
+    f.cause();        // NumberFormatException from the inner parse step
+}
+```
+
+### Context propagation and state isolation
+
+The outer pipeline's `RequestContext` (tenant id, trace id, etc.) is forwarded into the inner pipeline automatically. Inner `State` is isolated — each inner pipeline execution creates its own `State`, independent of the outer pipeline's `State`.
+
+### Observability
+
+The outer pipeline emits a single `step.start` / `step.finish` (or `step.error`) pair for the adapter step. The inner pipeline emits its own `step.start` / `step.finish` events for each of its steps. If both pipelines have `MetricsRecorder`s configured, both record metrics independently. Configure the inner pipeline with `.withMetrics(recorder)` at build time to give it its own recorder.
+
+### Resilience on the adapter step
+
+Resilience policies attached to the adapter step wrap the **entire** inner pipeline invocation. A retry retries the whole inner pipeline from the beginning, not an individual inner step.
+
+```java
+// Wrap the adapter in a custom StepDescriptor to attach a retry policy
+Step<String, String> base = inner.asStep("retriable-sub");
+Step<String, String> withRetry = new Step<>() {
+    @Override
+    public StepDescriptor<String, String> describe() {
+        return StepDescriptor.builder("retriable-sub", String.class, String.class)
+            .withRetry(RetryPolicy.fixed(3, 50))
+            .build();
+    }
+    @Override
+    public String execute(String input, StepContext ctx) throws Exception {
+        return base.execute(input, ctx);
+    }
+};
+
+Pipeline<String, String> outer = PipelineBuilder.start(String.class)
+    .then(withRetry)
+    .build();
+```
+
 ## Conditional branching
 
 Route execution down one of two typed sub-pipelines based on a predicate. Both arms must produce the same output type; type mismatches are caught at `build()` time.
