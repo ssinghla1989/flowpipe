@@ -33,12 +33,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public final class Pipeline<I, O> {
@@ -184,7 +184,7 @@ public final class Pipeline<I, O> {
                 }
                 current = ((ItemSuccess) result).value();
             } else if (node instanceof ParallelNode<?, ?> pn) {
-                ParallelOutcome parallelResult = executeParallel(pn, current, ctx, context, recorder, traceBuilder);
+                ParallelOutcome parallelResult = executeParallel(pn, current, ctx, context, recorder, traceBuilder, deadlineNs);
                 if (parallelResult instanceof ParallelFailure pf) {
                     return pf.failure();
                 }
@@ -402,48 +402,40 @@ public final class Pipeline<I, O> {
     @SuppressWarnings({"unchecked", "rawtypes"})
     private ParallelOutcome executeParallel(ParallelNode pn, Object input, DefaultStepContext ctx,
                                             RequestContext context, MetricsRecorder recorder,
-                                            ExecutionTrace.Builder traceBuilder) {
+                                            ExecutionTrace.Builder traceBuilder, long deadlineNs) {
         List<Step<Object, ?>> branches = pn.branches();
-        List<Future<BranchResult>> futures = new ArrayList<>(branches.size());
+        List<Future<ItemResult>> futures = new ArrayList<>(branches.size());
 
         for (Step<Object, ?> branch : branches) {
-            String stepId = branch.describe().id();
-            Callable<BranchResult> task = () -> {
-                Object span = safeStartSpan(spanRecorder, stepId, context);
-                emitStart(stepId, 1, context);
-                long startedAtNanos = System.nanoTime();
-                try {
-                    Object output = invokeStep(branch, input, ctx);
-                    long durationNanos = System.nanoTime() - startedAtNanos;
-                    TraceEntry entry = new TraceEntry(stepId, startedAtNanos, durationNanos, 1, false);
-                    emitRecord(recorder, stepId, durationNanos, 1, StepOutcome.SUCCESS);
-                    emitFinish(stepId, 1, durationNanos, context);
-                    safeFinishSpan(spanRecorder, span, StepOutcome.SUCCESS, null);
-                    return new BranchResult(stepId, output, entry, null);
-                } catch (Throwable t) {
-                    long durationNanos = System.nanoTime() - startedAtNanos;
-                    TraceEntry entry = new TraceEntry(stepId, startedAtNanos, durationNanos, 1, false);
-                    emitRecord(recorder, stepId, durationNanos, 1, StepOutcome.FAILURE);
-                    emitError(stepId, 1, durationNanos, context, t);
-                    safeFinishSpan(spanRecorder, span, StepOutcome.FAILURE, t);
-                    return new BranchResult(stepId, null, entry, t);
-                }
-            };
-
             try {
-                futures.add(executor.submit(task));
+                futures.add(executor.submit(
+                    () -> executeItemWithRetry(branch, input, branch.describe().id(), ctx, context, recorder)));
             } catch (RejectedExecutionException e) {
                 cancelAll(futures);
-                return new ParallelFailure(new Failure<>(e, stepId, traceBuilder.build()));
+                return new ParallelFailure(new Failure<>(e, branch.describe().id(), traceBuilder.build()));
             }
         }
 
         List<Object> outputs = new ArrayList<>(branches.size());
 
-        for (Future<BranchResult> future : futures) {
-            BranchResult br;
+        for (Future<ItemResult> future : futures) {
+            ItemResult result;
             try {
-                br = future.get();
+                if (deadlineNs == Long.MAX_VALUE) {
+                    result = future.get();
+                } else {
+                    long remainingNs = deadlineNs - System.nanoTime();
+                    if (remainingNs <= 0) {
+                        cancelAll(futures);
+                        return new ParallelFailure(new Failure<>(
+                            new PipelineDeadlineExceededException(deadlineMs), "pipeline.deadline", traceBuilder.build()));
+                    }
+                    result = future.get(remainingNs, TimeUnit.NANOSECONDS);
+                }
+            } catch (TimeoutException e) {
+                cancelAll(futures);
+                return new ParallelFailure(new Failure<>(
+                    new PipelineDeadlineExceededException(deadlineMs), "pipeline.deadline", traceBuilder.build()));
             } catch (ExecutionException e) {
                 cancelAll(futures);
                 return new ParallelFailure(new Failure<>(e.getCause(), "unknown", traceBuilder.build()));
@@ -453,12 +445,12 @@ public final class Pipeline<I, O> {
                 return new ParallelFailure(new Failure<>(e, "interrupted", traceBuilder.build()));
             }
 
-            traceBuilder.append(br.entry());
-            if (br.failure() != null) {
+            traceBuilder.append(result.trace());
+            if (result instanceof ItemFailure f) {
                 cancelAll(futures);
-                return new ParallelFailure(new Failure<>(br.failure(), br.stepId(), traceBuilder.build()));
+                return new ParallelFailure(new Failure<>(f.cause(), f.stepId(), traceBuilder.build()));
             }
-            outputs.add(br.output());
+            outputs.add(((ItemSuccess) result).value());
         }
 
         Object combined = pn.combiner().apply(outputs);
@@ -684,6 +676,4 @@ public final class Pipeline<I, O> {
     SpanRecorder spanRecorder() {
         return spanRecorder;
     }
-
-    private record BranchResult(String stepId, Object output, TraceEntry entry, Throwable failure) {}
 }

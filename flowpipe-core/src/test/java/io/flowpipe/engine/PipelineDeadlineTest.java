@@ -140,6 +140,38 @@ class PipelineDeadlineTest {
     }
 
     @Test
+    void deadline_enforced_while_waiting_for_parallel_branch() {
+        // One branch sleeps past the deadline; the pipeline must surface a deadline failure
+        // rather than blocking until the slow branch finishes.
+        Step<String, String> slow = Step.of("slow-par", String.class, String.class, (s, ctx) -> {
+            sleepUninterruptibly(500);
+            return s;
+        });
+        Step<String, String> fast = Step.of("fast-par", String.class, String.class, (s, ctx) -> s);
+
+        java.util.concurrent.ExecutorService exec = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
+                .parallel2(String.class, (a, b) -> a, slow, fast)
+                .withExecutor(exec)
+                .withDeadline(50)
+                .build();
+
+            long start = System.currentTimeMillis();
+            Result<String> result = pipeline.execute("x");
+            long elapsed = System.currentTimeMillis() - start;
+
+            assertThat(result).isInstanceOf(Failure.class);
+            assertThat(((Failure<String>) result).cause()).isInstanceOf(PipelineDeadlineExceededException.class);
+            assertThat(((Failure<String>) result).failedStepId()).isEqualTo("pipeline.deadline");
+            // Should not have waited the full 500ms for the slow branch
+            assertThat(elapsed).isLessThan(400);
+        } finally {
+            exec.shutdown();
+        }
+    }
+
+    @Test
     void no_deadline_by_default() {
         Step<String, String> step = Step.of("step", String.class, String.class, (s, ctx) -> {
             sleepUninterruptibly(30);

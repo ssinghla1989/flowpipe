@@ -95,6 +95,30 @@ class CircuitBreakerExecutionTest {
         assertThat(((Failure<Integer>) result).cause()).isInstanceOf(CircuitBreakerOpenException.class);
     }
 
+    @Test
+    void minimum_calls_floor_prevents_early_trip_with_low_failure_rate() {
+        // failureRateThreshold=10%, slidingWindowSize=20: ceil(10% * 20)=2 failures without the fix.
+        // minimumCalls=5 must floor the threshold to 5, so the circuit cannot open until 5 failures.
+        CircuitBreakerPolicy cbp = CircuitBreakerPolicy.of(10, 5, 20, 60_000L, 1);
+        Step<Integer, Integer> broken = alwaysFailingStep("s", cbp);
+        Pipeline<Integer, Integer> pipeline = PipelineBuilder.start(Integer.class).then(broken).build();
+
+        // 4 consecutive failures: without the minimumCalls floor the circuit would already be open
+        for (int i = 0; i < 4; i++) {
+            Result<Integer> r = pipeline.execute(1);
+            assertThat(r).isInstanceOf(Failure.class);
+            assertThat(((Failure<Integer>) r).cause()).isNotInstanceOf(CircuitBreakerOpenException.class);
+        }
+
+        // 5th failure trips the circuit (minimumCalls=5 reached)
+        pipeline.execute(1);
+
+        // 6th call → OPEN fast-fail
+        Result<Integer> result = pipeline.execute(1);
+        assertThat(result).isInstanceOf(Failure.class);
+        assertThat(((Failure<Integer>) result).cause()).isInstanceOf(CircuitBreakerOpenException.class);
+    }
+
     // ── 4.5 OPEN circuit fast-fails without calling execute ──────────────────
 
     @Test
@@ -305,6 +329,119 @@ class CircuitBreakerExecutionTest {
 
         // step.start must NOT be emitted for the open fast-fail call
         assertThat(appender.events("step.start")).isEmpty();
+    }
+
+    // ── foreach circuit breaker (fix: was silently ignored) ──────────────────
+
+    @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    void circuit_breaker_on_foreach_step_is_honored() {
+        // minimumCalls=2, 100% threshold: circuit opens after 2 failures across any items
+        CircuitBreakerPolicy cbp = CircuitBreakerPolicy.of(100, 2, 2, 60_000L, 1);
+        AtomicInteger executeCalls = new AtomicInteger();
+        StepDescriptor<String, String> desc = StepDescriptor.builder("cb-item", String.class, String.class)
+            .withCircuitBreaker(cbp)
+            .build();
+        Step<String, String> cbStep = new Step<>() {
+            @Override public StepDescriptor<String, String> describe() { return desc; }
+            @Override public String execute(String input, StepContext ctx) throws Exception {
+                executeCalls.incrementAndGet();
+                throw new RuntimeException("always fails");
+            }
+        };
+
+        Pipeline<java.util.List<String>, java.util.List<String>> pipeline =
+            (Pipeline<java.util.List<String>, java.util.List<String>>) (Pipeline)
+            PipelineBuilder.start((Class<java.util.List<String>>) (Class<?>) java.util.List.class)
+                .foreach(cbStep)
+                .build();
+
+        // Two single-item executions to trip the circuit
+        pipeline.execute(java.util.List.of("a")); // 1 failure
+        pipeline.execute(java.util.List.of("b")); // 2nd failure → circuit opens
+
+        int countBefore = executeCalls.get();
+        Result<java.util.List<String>> result = pipeline.execute(java.util.List.of("c"));
+
+        assertThat(executeCalls.get()).isEqualTo(countBefore); // execute not called
+        assertThat(result).isInstanceOf(Failure.class);
+        assertThat(((Failure<java.util.List<String>>) result).cause())
+            .isInstanceOf(CircuitBreakerOpenException.class);
+    }
+
+    // ── parallel circuit breaker (fix: was silently ignored) ──────────────────
+
+    @Test
+    void circuit_breaker_on_parallel_branch_step_is_honored() {
+        CircuitBreakerPolicy cbp = CircuitBreakerPolicy.of(100, 2, 2, 60_000L, 1);
+        AtomicInteger executeCalls = new AtomicInteger();
+        StepDescriptor<Integer, Integer> desc = StepDescriptor.builder("par-cb", Integer.class, Integer.class)
+            .withCircuitBreaker(cbp)
+            .build();
+        Step<Integer, Integer> cbStep = new Step<>() {
+            @Override public StepDescriptor<Integer, Integer> describe() { return desc; }
+            @Override public Integer execute(Integer input, StepContext ctx) throws Exception {
+                executeCalls.incrementAndGet();
+                throw new RuntimeException("always fails");
+            }
+        };
+        Step<Integer, Integer> stable = Step.of("stable", Integer.class, Integer.class, (n, ctx) -> n);
+
+        java.util.concurrent.ExecutorService exec = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            Pipeline<Integer, Integer> pipeline = PipelineBuilder.start(Integer.class)
+                .parallel2(Integer.class, (a, b) -> a, cbStep, stable)
+                .withExecutor(exec)
+                .build();
+
+            // Two failures on the parallel branch to trip its circuit
+            pipeline.execute(1); // 1 failure on par-cb
+            pipeline.execute(1); // 2nd failure → par-cb circuit opens
+
+            int countBefore = executeCalls.get();
+            Result<Integer> result = pipeline.execute(1);
+
+            assertThat(executeCalls.get()).isEqualTo(countBefore); // par-cb execute not called
+            assertThat(result).isInstanceOf(Failure.class);
+            assertThat(((Failure<Integer>) result).cause()).isInstanceOf(CircuitBreakerOpenException.class);
+        } finally {
+            exec.shutdown();
+        }
+    }
+
+    // ── parallel retry (fix: was silently ignored) ────────────────────────────
+
+    @Test
+    void retry_policy_on_parallel_branch_step_is_honored() {
+        AtomicInteger callCount = new AtomicInteger();
+        StepDescriptor<Integer, Integer> desc = StepDescriptor.builder("flaky-par", Integer.class, Integer.class)
+            .withRetry(RetryPolicy.fixed(3, 0))
+            .build();
+        Step<Integer, Integer> flaky = new Step<>() {
+            @Override public StepDescriptor<Integer, Integer> describe() { return desc; }
+            @Override public Integer execute(Integer input, StepContext ctx) throws Exception {
+                if (callCount.incrementAndGet() < 3) throw new RuntimeException("transient");
+                return input * 2;
+            }
+        };
+        Step<Integer, Integer> stable = Step.of("stable2", Integer.class, Integer.class, (n, ctx) -> n + 1);
+
+        java.util.concurrent.ExecutorService exec = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            Pipeline<Integer, Integer> pipeline = PipelineBuilder.start(Integer.class)
+                .parallel2(Integer.class, (a, b) -> a + b, flaky, stable)
+                .withExecutor(exec)
+                .build();
+
+            Result<Integer> result = pipeline.execute(5);
+
+            assertThat(result).isInstanceOf(io.flowpipe.api.Success.class);
+            // flaky succeeds on 3rd attempt: 5*2=10; stable: 5+1=6 → combined=16
+            assertThat(((io.flowpipe.api.Success<Integer>) result).value()).isEqualTo(16);
+            assertThat(callCount.get()).isEqualTo(3);
+        } finally {
+            exec.shutdown();
+        }
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────

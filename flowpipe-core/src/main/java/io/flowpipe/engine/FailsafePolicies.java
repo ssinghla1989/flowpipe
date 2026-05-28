@@ -61,10 +61,12 @@ final class FailsafePolicies {
     // Uses count-based withFailureThreshold rather than withFailureRateThreshold because the
     // rate-threshold variant requires openWindowMs >= 10ms, which breaks policies with
     // openWindowMs=0 (immediate HALF-OPEN). Count-based threshold has no such constraint.
-    // failures = ceil(failureRateThreshold% * slidingWindowSize), clamped to >= 1.
+    // failures = max(ceil(failureRateThreshold% * slidingWindowSize), minimumCalls), clamped to >= 1.
+    // The max ensures the circuit cannot trip before minimumCalls failures have been observed,
+    // regardless of the configured failure rate threshold.
     static CircuitBreaker<Object> toFailsafe(CircuitBreakerPolicy fp) {
         int failures = (int) Math.ceil(fp.failureRateThreshold() / 100.0 * fp.slidingWindowSize());
-        failures = Math.max(1, failures);
+        failures = Math.max(failures, fp.minimumCalls());
         var builder = CircuitBreaker.<Object>builder()
                 .withFailureThreshold(failures, fp.slidingWindowSize())
                 .withSuccessThreshold(fp.halfOpenProbeCount())

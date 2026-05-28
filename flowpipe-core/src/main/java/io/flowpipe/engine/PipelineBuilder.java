@@ -306,9 +306,21 @@ public final class PipelineBuilder<I, O> {
                 if (cbp != null) {
                     map.put(sn.step().describe().id(), FailsafePolicies.toFailsafe(cbp));
                 }
+            } else if (node instanceof ForeachNode<?, ?> fn) {
+                var cbp = fn.step().describe().circuitBreakerPolicy();
+                if (cbp != null) {
+                    map.put(fn.step().describe().id(), FailsafePolicies.toFailsafe(cbp));
+                }
+            } else if (node instanceof ParallelNode<?, ?> pn) {
+                for (Step<?, ?> branch : pn.branches()) {
+                    var cbp = branch.describe().circuitBreakerPolicy();
+                    if (cbp != null) {
+                        map.put(branch.describe().id(), FailsafePolicies.toFailsafe(cbp));
+                    }
+                }
             }
-            // Branch arms and foreach steps are not pre-built here; they inherit from
-            // the arm Pipeline instances which build their own registry at build() time.
+            // Branch arms have their own Pipeline instances built via build(), which construct
+            // their own circuit-breaker registry at that time.
         }
         return java.util.Collections.unmodifiableMap(map);
     }
