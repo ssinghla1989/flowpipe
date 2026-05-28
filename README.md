@@ -2,6 +2,8 @@
 
 A Java library for orchestrating synchronous API pipelines. Compose typed, reusable steps into pipelines with automatic input/output validation, build-time wiring checks, and zero-boilerplate logging and metrics around every step.
 
+FlowPipe is **embeddable** — no servers, no runtimes, no daemons. It runs unchanged on AWS Lambda and EC2.
+
 ## Requirements
 
 - Java 21 or newer
@@ -13,7 +15,7 @@ A Java library for orchestrating synchronous API pipelines. Compose typed, reusa
 ./gradlew build
 ```
 
-## Example
+## Quick start
 
 Define two steps, chain them, execute, then discriminate the result.
 
@@ -25,66 +27,249 @@ import io.flowpipe.api.Success;
 import io.flowpipe.engine.Pipeline;
 import io.flowpipe.engine.PipelineBuilder;
 
-public class Example {
+Step<String, Integer> parse = Step.of(
+    "parse", String.class, Integer.class,
+    (input, ctx) -> Integer.parseInt(input));
 
-    public static void main(String[] args) {
-        Step<String, Integer> parse = Step.of(
-            "parse", String.class, Integer.class,
-            (input, ctx) -> Integer.parseInt(input));
+Step<Integer, String> describe = Step.of(
+    "describe", Integer.class, String.class,
+    (input, ctx) -> input >= 0 ? "non-negative" : "negative");
 
-        Step<Integer, String> describe = Step.of(
-            "describe", Integer.class, String.class,
-            (input, ctx) -> input >= 0 ? "non-negative" : "negative");
+Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
+    .then(parse)
+    .then(describe)
+    .build();
 
-        Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
-            .then(parse)
-            .then(describe)
-            .build();
+Result<String> result = pipeline.execute("42");
 
-        Result<String> result = pipeline.execute("42");
-
-        if (result instanceof Success<String> s) {
-            System.out.println("ok: " + s.value());
-        } else if (result instanceof Failure<String> f) {
-            System.err.println("failed at " + f.failedStepId() + ": " + f.cause());
-        }
-    }
+if (result instanceof Success<String> s) {
+    System.out.println("ok: " + s.value());
+} else if (result instanceof Failure<String> f) {
+    System.err.println("failed at " + f.failedStepId() + ": " + f.cause());
 }
 ```
 
-`pipeline.build()` validates wiring before any request runs: empty pipelines, duplicate step ids, and step-to-step type mismatches all fail at build time, not execution time.
+`pipeline.build()` validates wiring before any request runs: empty pipelines, duplicate step ids, and step-to-step type mismatches all fail at build time, not at execution time.
 
-## Parallel composition
+---
 
-Fan out to multiple independent steps simultaneously and merge their typed outputs with a combiner:
+## Defining steps
+
+### Inline steps with `Step.of()`
+
+For simple, one-off steps, use the factory:
 
 ```java
-import io.flowpipe.api.Step;
-import io.flowpipe.engine.Pipeline;
-import io.flowpipe.engine.PipelineBuilder;
+Step<String, Integer> parse = Step.of(
+    "parse",           // unique id within the pipeline
+    String.class,      // input type
+    Integer.class,     // output type
+    (input, ctx) -> Integer.parseInt(input));
+```
 
-Step<String, Integer> wordCount = Step.of(
-    "wordCount", String.class, Integer.class,
-    (text, ctx) -> text.split("\\s+").length);
+The id is used in logs, metrics, trace entries, and failure reporting. It must be unique within the pipeline — `build()` will reject duplicates.
 
-Step<String, Integer> charCount = Step.of(
-    "charCount", String.class, Integer.class,
-    (text, ctx) -> text.length());
+### Richer steps with `StepDescriptor`
 
-Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
-    .parallel2(
-        String.class,
-        (words, chars) -> "words=" + words + " chars=" + chars,
-        wordCount,
-        charCount)
+When you need retry, timeout, circuit breaker, or validation policies attached to a step, build a `StepDescriptor` and implement `Step` directly:
+
+```java
+StepDescriptor<String, UserProfile> desc = StepDescriptor
+    .builder("fetch-profile", String.class, UserProfile.class)
+    .withRetry(RetryPolicy.exponential(3, 100, 2.0, true))
+    .withTimeout(TimeoutPolicy.ofMillis(500))
+    .withCircuitBreaker(CircuitBreakerPolicy.defaults())
+    .inputValidator(input -> {
+        if (input == null || input.isBlank())
+            throw new ValidationException("userId must not be blank");
+    })
+    .build();
+
+Step<String, UserProfile> fetchProfile = new Step<>() {
+    @Override public StepDescriptor<String, UserProfile> describe() { return desc; }
+    @Override public UserProfile execute(String userId, StepContext ctx) {
+        return profileService.fetch(userId);
+    }
+};
+```
+
+All policies on the descriptor are applied transparently by the framework — the `execute` method sees a single call per attempt and writes no retry or timeout code.
+
+A step returning `null` from `execute()` immediately surfaces as `Failure` with a `NullPointerException` naming the offending step, before any output validation runs.
+
+### Accessing shared state and request context
+
+The `StepContext` passed to every `execute()` call provides two data channels:
+
+**`State`** — mutable, execution-scoped, shared across all steps in a single `pipeline.execute(...)` call. Backed by `ConcurrentHashMap`, safe for concurrent reads/writes during parallel or concurrent-foreach execution. Compound read-modify-write operations are the caller's responsibility.
+
+```java
+// Define typed keys — equality is based on both name and type
+StateKey<List<String>> errorsKey = StateKey.of("validation-errors", List.class);
+
+// A step that writes to state
+Step<Order, Order> validate = Step.of("validate", Order.class, Order.class,
+    (order, ctx) -> {
+        List<String> errors = new ArrayList<>();
+        if (order.amount() <= 0) errors.add("amount must be positive");
+        ctx.state().set(errorsKey, errors);
+        return order;
+    });
+
+// A later step that reads from state
+Step<Order, OrderResult> charge = Step.of("charge", Order.class, OrderResult.class,
+    (order, ctx) -> {
+        List<String> errors = ctx.state().get(errorsKey);
+        if (errors != null && !errors.isEmpty()) throw new ValidationException(errors.toString());
+        return paymentService.charge(order);
+    });
+```
+
+**`RequestContext`** — immutable, request-scoped, set before the pipeline executes. Used for tenant IDs, trace IDs, feature flags, or any per-request metadata. Steps only read it; they cannot write to it.
+
+```java
+// Define typed keys
+ContextKey<String> tenantKey = ContextKey.of("tenant-id", String.class);
+ContextKey<String> traceKey  = ContextKey.of("trace-id",  String.class);
+
+// Build and pass context at execution time
+RequestContext ctx = RequestContext.builder()
+    .put(tenantKey, "acme-corp")
+    .put(traceKey,  "abc-123")
+    .build();
+
+Result<String> result = pipeline.execute(input, ctx);
+
+// Inside a step
+Step<Order, Order> auditStep = Step.of("audit", Order.class, Order.class,
+    (order, stepCtx) -> {
+        String tenant = stepCtx.context().get(tenantKey); // "acme-corp"
+        auditLog.record(tenant, order);
+        return order;
+    });
+```
+
+Every `RequestContext` entry is automatically included as a structured key-value field in every SLF4J log event emitted by the framework.
+
+---
+
+## Composing pipelines
+
+### Sequential composition
+
+Chain steps with `.then()`. Each step's output type must match the next step's input type — verified at `build()` time:
+
+```java
+Pipeline<String, OrderResult> pipeline = PipelineBuilder.start(String.class)
+    .then(parseStep)      // Step<String, Order>
+    .then(validateStep)   // Step<Order, Order>
+    .then(chargeStep)     // Step<Order, OrderResult>
     .build();
 ```
 
-Both branches receive the same input concurrently. The combiner's return type becomes the next step's input type. `parallel3` and `parallel4` extend the pattern to three and four branches; `parallelN` handles higher arities with an untyped `Map`-based combiner.
+The builder enforces type compatibility at each `.then()` call and again in `build()`. A mismatch throws `PipelineBuildException` immediately — no request needs to run for the bug to be caught.
+
+### Executing a pipeline
+
+Three overloads are available:
+
+```java
+// No context, no metrics override
+Result<OrderResult> r1 = pipeline.execute(input);
+
+// With request context (tenant id, trace id, etc.)
+Result<OrderResult> r2 = pipeline.execute(input, requestContext);
+
+// With context and a per-call metrics recorder override
+Result<OrderResult> r3 = pipeline.execute(input, requestContext, metricsRecorder);
+```
+
+### The Result type
+
+`Result<O>` is a sealed interface with exactly two implementations:
+
+```java
+if (result instanceof Success<OrderResult> s) {
+    OrderResult value = s.value();
+    ExecutionTrace trace = s.trace();  // one TraceEntry per step
+}
+if (result instanceof Failure<OrderResult> f) {
+    String stepId   = f.failedStepId(); // id of the step that threw
+    Throwable cause = f.cause();        // the original exception, never wrapped
+    ExecutionTrace trace = f.trace();   // entries for steps that ran before the failure
+}
+```
+
+`ExecutionTrace.entries()` returns one `TraceEntry` per step: step id, start timestamp (nanoseconds), duration (nanoseconds), attempt count, and a `skipped` flag for branch arms that did not run.
+
+---
+
+## Parallel composition
+
+Fan out to multiple independent steps simultaneously and merge their typed outputs with a combiner.
+
+### `parallel2` / `parallel3` / `parallel4`
+
+```java
+Step<String, Integer> wordCount = Step.of("wordCount", String.class, Integer.class,
+    (text, ctx) -> text.split("\\s+").length);
+
+Step<String, Integer> charCount = Step.of("charCount", String.class, Integer.class,
+    (text, ctx) -> text.length());
+
+Step<String, Long> lineCount = Step.of("lineCount", String.class, Long.class,
+    (text, ctx) -> text.lines().count());
+
+// parallel2 — two branches, typed combiner
+Pipeline<String, String> two = PipelineBuilder.start(String.class)
+    .parallel2(
+        String.class,                                          // result type
+        (words, chars) -> "words=" + words + " chars=" + chars, // BiFunction<A, B, R>
+        wordCount,
+        charCount)
+    .build();
+
+// parallel3 — three branches
+Pipeline<String, String> three = PipelineBuilder.start(String.class)
+    .parallel3(
+        String.class,
+        (words, chars, lines) -> words + " / " + chars + " / " + lines, // TriFunction<A, B, C, R>
+        wordCount,
+        charCount,
+        lineCount)
+    .build();
+```
+
+`Class<R>` is the first argument and enables downstream type-compatibility checking at `build()` time. `parallel4` follows the same pattern with a `QuadFunction<A, B, C, D, R>` combiner.
+
+All branches receive the same input (the current pipeline cursor value). The combiner is called with branch outputs **in declaration order**, not completion order. No subsequent step runs until all branches have either completed or failed.
+
+### `parallelN` — variadic escape hatch for arities above 4
+
+```java
+Map<String, Step<String, ?>> steps = new LinkedHashMap<>();
+steps.put("words", wordCount);   // key must match step.describe().id()
+steps.put("chars", charCount);
+steps.put("lines", lineCount);
+
+Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
+    .parallelN(
+        String.class,
+        steps,
+        results -> {            // Function<Map<String, Object>, R>
+            int words = (int)  results.get("words");
+            int chars = (int)  results.get("chars");
+            long lines = (long) results.get("lines");
+            return words + " words, " + chars + " chars, " + lines + " lines";
+        })
+    .build();
+```
+
+The map keys must match the corresponding step's `StepDescriptor.id()`. A mismatch is caught at `build()` and throws `PipelineBuildException`.
 
 ### Executor
 
-By default, branches are submitted to `ForkJoinPool.commonPool()`. Supply a dedicated executor with `.withExecutor(ExecutorService)`:
+By default, branches are submitted to `ForkJoinPool.commonPool()`. Supply a dedicated executor:
 
 ```java
 Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
@@ -93,11 +278,15 @@ Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
     .build();
 ```
 
-**Lambda users**: on a 1-vCPU Lambda the common pool's parallelism is 0, which means branches execute on the calling thread and parallelism is illusory. Supply a `Executors.newCachedThreadPool()` executor (and shut it down after the invocation) to get real concurrency. FlowPipe never shuts down the executor it is given.
+FlowPipe **never** shuts down the executor it is given — lifecycle is the caller's responsibility.
+
+**Lambda users**: on a 1-vCPU Lambda the common pool's parallelism is 0, so branches execute on the calling thread and parallelism is illusory. Supply `Executors.newCachedThreadPool()` and shut it down after the invocation.
 
 ### Resilience policies on parallel branches
 
 `RetryPolicy`, `TimeoutPolicy`, and `CircuitBreakerPolicy` attached to a parallel branch step's `StepDescriptor` are fully honored — the branch runs through the same retry/timeout/circuit-breaker machinery as sequential steps. A retry configured on a parallel branch retries within that branch's executor thread, transparent to the rest of the pipeline.
+
+---
 
 ## Pipeline composition
 
@@ -107,30 +296,25 @@ Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
 
 ```java
 // Inner pipeline: parse a string, then double the integer
-Step<String, Integer> parse = Step.of("parse", String.class, Integer.class,
-    (s, ctx) -> Integer.parseInt(s));
-Step<Integer, Integer> doubler = Step.of("double", Integer.class, Integer.class,
-    (n, ctx) -> n * 2);
-
-Pipeline<String, Integer> inner = PipelineBuilder.start(String.class)
-    .then(parse)
-    .then(doubler)
+Pipeline<String, Integer> transform = PipelineBuilder.start(String.class)
+    .then(parseStep)    // Step<String, Integer>
+    .then(doublerStep)  // Step<Integer, Integer>
     .build();
 
-// Outer pipeline: run inner, then add 10
+// Outer pipeline: run the inner pipeline, then add 10
 Pipeline<String, Integer> outer = PipelineBuilder.start(String.class)
-    .then(inner.asStep("transform"))   // "transform" is the step id as seen by the outer pipeline
+    .then(transform.asStep("transform"))  // id as seen by the outer pipeline
     .then(addTenStep)
     .build();
 
-// execute("5") → inner produces 10, outer produces 20
+// execute("5") → transform produces 10, outer produces 20
 ```
 
 The string passed to `asStep()` is the step id the outer pipeline uses for logging, metrics, and the `ExecutionTrace`. Inner step ids never appear in the outer trace — each pipeline maintains its own trace.
 
 ### Scatter-gather with `.foreach()`
 
-The primary Mastra pattern for multi-step fan-out: apply a full sub-pipeline to every element of a list.
+The primary pattern for applying a multi-step sub-pipeline to every element of a list:
 
 ```java
 // Inner pipeline: trim whitespace, then uppercase
@@ -142,41 +326,44 @@ Pipeline<String, String> enrich = PipelineBuilder.start(String.class)
 // Outer pipeline: split input into a list, then enrich each element
 Pipeline<String, List<String>> outer = PipelineBuilder.start(String.class)
     .then(splitStep)                  // Step<String, List<String>>
-    .foreach(enrich.asStep("enrich")) // applies the two-step inner pipeline per element
+    .foreach(enrich.asStep("enrich")) // applies the full inner pipeline per element
     .build();
 
 // execute(" hello , world ") → ["HELLO", "WORLD"]
 ```
 
-`foreach(step, N)` with `N > 1` runs elements concurrently in windows of `N`, using the pipeline's executor.
-
-### Parallel branches
+Add a concurrency parameter to process elements in parallel windows:
 
 ```java
-// Two inner pipelines running concurrently on the same input
+.foreach(enrich.asStep("enrich"), 8)  // up to 8 concurrent element executions
+```
+
+### Parallel branches as pipelines
+
+```java
 Pipeline<String, String> wordStats = PipelineBuilder.start(String.class)
-    .then(wordCountStep)
-    .then(formatStep)
+    .then(wordCountStep)  // Step<String, Integer>
+    .then(formatStep)     // Step<Integer, String>
     .build();
 
 Pipeline<String, String> outer = PipelineBuilder.start(String.class)
     .parallel2(
         String.class,
-        (wordResult, charCount) -> wordResult + " chars=" + charCount,
-        wordStats.asStep("word-stats"),  // runs a full inner pipeline as a branch
+        (wordResult, chars) -> wordResult + " chars=" + chars,
+        wordStats.asStep("word-stats"),  // full pipeline as a parallel branch
         charCountStep)
     .build();
 ```
 
 ### Failure propagation
 
-When the inner pipeline fails, the original exception becomes `Failure.cause()` in the outer pipeline. The `failedStepId()` is the adapter step's id (e.g. `"transform"`), not the id of the inner step that actually threw. This keeps the outer pipeline's failure reporting stable regardless of what's inside the inner pipeline.
+When the inner pipeline fails, the original exception becomes `Failure.cause()` in the outer pipeline. The `failedStepId()` is the adapter step's id, not the id of the inner step that threw — the outer pipeline's failure surface remains stable regardless of inner structure.
 
 ```java
 Result<Integer> result = outer.execute("not-a-number");
 if (result instanceof Failure<Integer> f) {
     f.failedStepId(); // "transform" — the adapter step id
-    f.cause();        // NumberFormatException from the inner parse step
+    f.cause();        // NumberFormatException from inside the inner pipeline
 }
 ```
 
@@ -186,14 +373,13 @@ The outer pipeline's `RequestContext` (tenant id, trace id, etc.) is forwarded i
 
 ### Observability
 
-The outer pipeline emits a single `step.start` / `step.finish` (or `step.error`) pair for the adapter step. The inner pipeline emits its own `step.start` / `step.finish` events for each of its steps. If both pipelines have `MetricsRecorder`s configured, both record metrics independently. Configure the inner pipeline with `.withMetrics(recorder)` at build time to give it its own recorder.
+The outer pipeline emits one `step.start` / `step.finish` pair for the adapter step. The inner pipeline emits its own events for each of its steps. If both pipelines have `MetricsRecorder`s configured, both record independently. Configure the inner pipeline with `.withMetrics(recorder)` at build time to give it its own recorder.
 
 ### Resilience on the adapter step
 
-Resilience policies attached to the adapter step wrap the **entire** inner pipeline invocation. A retry retries the whole inner pipeline from the beginning, not an individual inner step.
+Policies on the adapter step wrap the **entire** inner pipeline invocation — a retry retries the whole inner pipeline from the beginning, not an individual inner step.
 
 ```java
-// Wrap the adapter in a custom StepDescriptor to attach a retry policy
 Step<String, String> base = inner.asStep("retriable-sub");
 Step<String, String> withRetry = new Step<>() {
     @Override
@@ -213,34 +399,140 @@ Pipeline<String, String> outer = PipelineBuilder.start(String.class)
     .build();
 ```
 
+---
+
 ## Conditional branching
 
-Route execution down one of two typed sub-pipelines based on a predicate. Both arms must produce the same output type; type mismatches are caught at `build()` time.
+Route execution down one of two typed sub-pipelines based on a predicate. Both arms must accept the same input type and produce the same output type — verified at `build()` time.
 
 ```java
+Pipeline<Order, OrderResult> inStock = PipelineBuilder.start(Order.class)
+    .then(processStep)
+    .build();
+
+Pipeline<Order, OrderResult> outOfStock = PipelineBuilder.start(Order.class)
+    .then(backorderStep)
+    .build();
+
 Pipeline<Order, OrderResult> pipeline = PipelineBuilder.start(Order.class)
     .branch(
-        "check-stock",
-        (order, ctx) -> inventoryService.isInStock(order),
-        PipelineBuilder.start(Order.class).then(processStep).build(),
-        PipelineBuilder.start(Order.class).then(backorderStep).build())
+        "check-stock",                                        // branch id (unique within the pipeline)
+        (order, ctx) -> inventoryService.isInStock(order),   // BiPredicate<O, StepContext>
+        inStock,                                              // ifTrue arm
+        outOfStock)                                           // ifFalse arm
     .build();
 ```
 
-The skipped arm's steps appear in the `ExecutionTrace` as skipped entries.
+The skipped arm's steps appear in the `ExecutionTrace` as skipped entries. The predicate receives the full `StepContext` so it can read `State` or `RequestContext` if needed.
+
+---
+
+## Foreach fan-out
+
+Apply a step to every element of a `List` input and collect the results into a `List`.
+
+```java
+Step<String, UserProfile> enrich = Step.of(
+    "enrich-user", String.class, UserProfile.class,
+    (userId, ctx) -> profileService.fetch(userId));
+
+Pipeline<List<String>, List<UserProfile>> pipeline = PipelineBuilder
+    .start((Class<List<String>>) (Class<?>) List.class)
+    .foreach(enrich)       // sequential, concurrency = 1
+    // .foreach(enrich, 8) // up to 8 concurrent element executions
+    .build();
+```
+
+Sequential foreach preserves element order. Concurrent foreach (`concurrency > 1`) processes elements in windows of that size using the pipeline's executor; output order matches input order regardless of completion order within a window.
+
+For multi-step processing per element, use `Pipeline.asStep()` inside `foreach` — see [Scatter-gather](#scatter-gather-with-foreach).
+
+---
 
 ## Retry with backoff
 
-Attach a `RetryPolicy` to any `StepDescriptor` to make the framework retry that step transparently on failure. Step authors write no retry code.
+Attach a `RetryPolicy` to any `StepDescriptor`. The framework retries transparently — step authors write no retry code.
 
 ```java
 StepDescriptor<Order, PaymentResult> desc = StepDescriptor
     .builder("charge-card", Order.class, PaymentResult.class)
     .withRetry(RetryPolicy.exponential(3, 100, 2.0, true))
+    //                     attempts  initial(ms) multiplier jitter
     .build();
 ```
 
-`RetryPolicy.fixed(attempts, delayMs)` gives constant-delay retries; `RetryPolicy.exponential(attempts, initialMs, multiplier, jitter)` doubles the delay between attempts. `RetryPolicy.none()` (the default) means one attempt with no retry.
+| Factory | Behaviour |
+|---|---|
+| `RetryPolicy.none()` | One attempt, no retry (default) |
+| `RetryPolicy.fixed(attempts, delayMs)` | Constant delay between attempts |
+| `RetryPolicy.exponential(attempts, initialMs, multiplier, jitter)` | Delay grows by `multiplier` each attempt; `jitter=true` adds randomness to avoid thundering herd |
+
+A `step.retry` log event is emitted at `WARN` level before each retry attempt, carrying `step.id`, `step.attempt`, `step.max_attempts`, and `step.delay_ms`. Metrics are recorded once for the final outcome, not per attempt.
+
+---
+
+## Per-step timeout
+
+Attach a `TimeoutPolicy` to any `StepDescriptor` to give that step a hard deadline per attempt.
+
+```java
+StepDescriptor<String, UserProfile> desc = StepDescriptor
+    .builder("fetch-profile", String.class, UserProfile.class)
+    .withTimeout(TimeoutPolicy.ofMillis(500))
+    .build();
+```
+
+`TimeoutPolicy.of(2, TimeUnit.SECONDS)` is an alternative constructor. When combined with `RetryPolicy`, each retry attempt gets its own independent deadline — the timeout is per-attempt, not per-retry-loop. A step that exceeds its deadline is interrupted and the pipeline produces a `Failure` whose `cause()` is `StepTimeoutException` (carrying the step id and configured timeout milliseconds). Steps without a `TimeoutPolicy` (the default) run without a time bound.
+
+---
+
+## Pipeline deadline
+
+Set a wall-clock budget for an entire pipeline execution with `.withDeadline(long ms)`. The deadline is checked before every node — sequential steps, parallel blocks, branch arm entry, and between foreach items — and is also enforced while waiting for parallel branch futures (a slow branch cannot hold the pipeline past the deadline).
+
+```java
+Pipeline<Order, OrderResult> pipeline = PipelineBuilder.start(Order.class)
+    .then(validateStep)
+    .then(enrichStep)
+    .withDeadline(2_000)                   // 2 000 ms wall-clock budget
+    // .withDeadline(2, TimeUnit.SECONDS)  // same, using TimeUnit overload
+    .build();
+```
+
+If the budget is exceeded, execution stops immediately and the pipeline returns a `Failure` whose `cause()` is `PipelineDeadlineExceededException` (which carries `deadlineMs()`) and whose `failedStepId()` is `"pipeline.deadline"`.
+
+The per-step `TimeoutPolicy` and the pipeline deadline are orthogonal: a step can have both. The tighter bound wins — whichever fires first terminates that step. The pipeline deadline propagates automatically into branch arm sub-pipelines.
+
+---
+
+## Circuit breaker
+
+Attach a `CircuitBreakerPolicy` to any `StepDescriptor` to prevent cascading failures when a downstream dependency is unhealthy. The circuit transitions through CLOSED → OPEN → HALF-OPEN states automatically.
+
+```java
+StepDescriptor<String, UserProfile> desc = StepDescriptor
+    .builder("fetch-profile", String.class, UserProfile.class)
+    .withCircuitBreaker(CircuitBreakerPolicy.of(
+        50,       // open when ≥ 50 % of calls in the window fail
+        5,        // minimumCalls: circuit will not open until at least 5 failures observed
+        10,       // sliding window size (last N calls evaluated)
+        30_000L,  // stay open for 30 s before allowing a probe call
+        2))       // allow 2 probe calls in HALF-OPEN before closing
+    .build();
+```
+
+`CircuitBreakerPolicy.defaults()` gives reasonable out-of-the-box settings (50 % threshold, 5 minimum calls, window of 10, 60 s open window, 2 half-open probes).
+
+**Key behaviours:**
+- When OPEN, the step fast-fails with a `Failure` whose `cause()` is `CircuitBreakerOpenException` (carrying the step id and `retriableAfter()` timestamp) — no call is made to `execute()`.
+- Circuit state is **per-`Pipeline` instance**, keyed by step id, and persists across `pipeline.execute(...)` calls. Different `Pipeline` instances maintain independent circuit state.
+- When combined with `RetryPolicy`, the circuit evaluates the **final outcome of the retry loop**, not individual attempt outcomes — a step that retries successfully counts as one success, not N−1 failures.
+- `minimumCalls` is a hard floor: the circuit will not open until at least that many failures have been observed, regardless of the failure-rate threshold. This prevents premature tripping during pipeline warm-up.
+- Applies to sequential steps, foreach steps, and parallel branch steps.
+
+A `step.circuit_open` log event is emitted at `WARN` level when the circuit fast-fails a call.
+
+---
 
 ## Lifecycle hooks
 
@@ -251,113 +543,81 @@ Pipeline<Order, OrderResult> pipeline = PipelineBuilder.start(Order.class)
     .then(validateStep)
     .then(chargeStep)
     .withLifecycle(new PipelineLifecycle<Order, OrderResult>() {
-        @Override public void onStart(Order input, StepContext ctx) {
-            tracer.startSpan(ctx.context().get(TRACE_ID_KEY));
+        @Override
+        public void onStart(Order input, StepContext ctx) {
+            String traceId = ctx.context().get(TRACE_ID_KEY);
+            tracer.startSpan("order-pipeline", traceId);
         }
-        @Override public void onFinish(Result<OrderResult> result, StepContext ctx) {
+        @Override
+        public void onFinish(Result<OrderResult> result, StepContext ctx) {
             tracer.finishSpan();
         }
-        @Override public void onError(Failure<OrderResult> failure, StepContext ctx) {
-            alerts.send(failure.failedStepId(), failure.cause());
+        @Override
+        public void onError(Failure<OrderResult> failure, StepContext ctx) {
+            alerts.send("order-pipeline", failure.failedStepId(), failure.cause());
         }
     })
     .build();
 ```
 
-Hooks fire at the top-level pipeline boundary only; sub-pipelines inside `branch(...)` do not re-fire the parent hooks.
+All three methods have default no-op implementations on the interface, so you only override what you need. Exceptions thrown by hook callbacks are caught and logged as `lifecycle.hook_failed` warnings — they never affect the pipeline result.
 
-## Foreach fan-out
+Hooks fire at the **top-level pipeline boundary only**. Sub-pipelines used inside `.branch()` arms or as steps via `.asStep()` do not re-fire the parent pipeline's hooks.
 
-Apply a step to every element of a `List` input and collect the results. Optionally run elements concurrently in a fixed-size window.
-
-```java
-Step<String, UserProfile> enrichStep = Step.of(
-    "enrich-user", String.class, UserProfile.class,
-    (userId, ctx) -> profileService.fetch(userId));
-
-Pipeline<List<String>, List<UserProfile>> pipeline = PipelineBuilder
-    .start((Class<List<String>>) (Class<?>) List.class)
-    .foreach(enrichStep)          // sequential (concurrency = 1)
-    // .foreach(enrichStep, 8)    // up to 8 concurrent
-    .build();
-```
-
-Sequential foreach preserves order; concurrent foreach processes elements in windows of the given size using the pipeline's executor.
-
-## Per-step timeout
-
-Attach a `TimeoutPolicy` to any `StepDescriptor` to give that step a hard deadline per attempt. A step that exceeds its deadline is interrupted and the pipeline produces a `Failure` whose `cause()` is a `StepTimeoutException`.
-
-```java
-StepDescriptor<String, UserProfile> desc = StepDescriptor
-    .builder("fetch-profile", String.class, UserProfile.class)
-    .withTimeout(TimeoutPolicy.ofMillis(500))
-    .build();
-```
-
-`TimeoutPolicy.of(2, TimeUnit.SECONDS)` is an alternative constructor. When combined with a `RetryPolicy`, each retry attempt gets its own independent deadline. Steps without a `TimeoutPolicy` (the default `TimeoutPolicy.none()`) run without a time bound.
-
-## Pipeline deadline
-
-Set a wall-clock budget for an entire pipeline execution with `.withDeadline(long ms)`. The deadline is checked before every sequential step, before and during parallel block execution, before branch arm execution, and between foreach items.
-
-```java
-Pipeline<Order, OrderResult> pipeline = PipelineBuilder.start(Order.class)
-    .then(validateStep)
-    .then(enrichStep)
-    .withDeadline(2_000) // 2-second total budget
-    .build();
-```
-
-If the budget is exceeded at any point, execution stops immediately and the pipeline returns a `Failure` whose `cause()` is `PipelineDeadlineExceededException` (which carries `deadlineMs()`) and whose `failedStepId()` is `"pipeline.deadline"`.
-
-`TimeoutPolicy.withDeadline(long duration, TimeUnit unit)` is an alternative constructor. The per-step `TimeoutPolicy` and the pipeline deadline are independent: a step can have both, and the tighter bound wins.
-
-## Circuit breaker
-
-Attach a `CircuitBreakerPolicy` to any `StepDescriptor` to prevent cascading failures when a downstream dependency is unhealthy. The circuit transitions through CLOSED → OPEN → HALF-OPEN states automatically.
-
-```java
-StepDescriptor<String, UserProfile> desc = StepDescriptor
-    .builder("fetch-profile", String.class, UserProfile.class)
-    .withCircuitBreaker(CircuitBreakerPolicy.of(
-        50,      // open when ≥ 50 % of calls fail
-        5,       // minimum calls before the rate is evaluated
-        10,      // sliding window size
-        30_000L, // stay open for 30 s
-        2))      // allow 2 probe calls in HALF-OPEN before closing
-    .build();
-```
-
-`CircuitBreakerPolicy.defaults()` gives reasonable out-of-the-box settings (50 % threshold, 5 minimum calls, window of 10, 60 s open window, 2 half-open probes). When the circuit is OPEN, the step fast-fails with a `Failure` whose `cause()` is a `CircuitBreakerOpenException` — no call is made to the step's `execute` method. Circuit state is per-`Pipeline` instance, keyed by step id, and persists across `pipeline.execute(...)` calls. When combined with `RetryPolicy`, the circuit evaluates the final outcome of the retry loop, not individual attempt outcomes.
-
-`minimumCalls` sets a hard floor: the circuit will not open until at least that many failures have been observed, even if the failure-rate threshold would otherwise be met sooner.
-
-`CircuitBreakerPolicy` works on sequential steps, foreach steps, and parallel branch steps.
+---
 
 ## Observability
 
-Every step invocation emits three structured SLF4J events — `step.start`, then either `step.finish` (success) or `step.error` (failure) — carrying `step.id`, `step.attempt`, `step.duration_ms`, `step.outcome`, error class/message on failure, and every `RequestContext` entry as a structured key-value field. Configure your SLF4J backend the usual way; no library configuration required.
+### SLF4J structured logging
 
-Plug in a metrics backend by implementing `MetricsRecorder`:
+Every step invocation automatically emits three structured log events — no step code required:
+
+| Event | Level | When |
+|---|---|---|
+| `step.start` | INFO | Before the first (or only) attempt |
+| `step.finish` | INFO | After a successful attempt |
+| `step.error` | ERROR | After a failed final attempt |
+| `step.retry` | WARN | Before each retry attempt |
+| `step.circuit_open` | WARN | When a circuit breaker fast-fails a step |
+| `step.skip` | DEBUG | When a branch arm step is skipped |
+
+Every event carries: `step.id`, `step.attempt`, `step.duration_ms`, `step.outcome`. Error events add `step.error_class` and `step.error_message`. Every `RequestContext` entry is added as additional structured key-value fields, making distributed log correlation automatic.
+
+Configure your SLF4J backend (Logback, Log4j2, etc.) the usual way; no FlowPipe-specific configuration is required.
+
+### MetricsRecorder SPI
+
+Implement `MetricsRecorder` to receive per-step metrics calls after every execution:
 
 ```java
 import io.flowpipe.observability.MetricsRecorder;
 import io.flowpipe.observability.StepOutcome;
 
 class MicrometerRecorder implements MetricsRecorder {
-    private final io.micrometer.core.instrument.MeterRegistry registry;
-    MicrometerRecorder(io.micrometer.core.instrument.MeterRegistry r) { this.registry = r; }
+    private final MeterRegistry registry;
 
-    @Override public void recordStepDuration(String stepId, long durationNanos) {
+    @Override
+    public void recordStepDuration(String stepId, long durationNanos) {
         registry.timer("flowpipe.step.duration", "step", stepId)
-            .record(durationNanos, java.util.concurrent.TimeUnit.NANOSECONDS);
+            .record(durationNanos, TimeUnit.NANOSECONDS);
     }
-    @Override public void recordStepAttempts(String stepId, int attempts) {
-        registry.counter("flowpipe.step.attempts", "step", stepId).increment(attempts);
+
+    @Override
+    public void recordStepAttempts(String stepId, int attempts) {
+        registry.counter("flowpipe.step.attempts", "step", stepId)
+            .increment(attempts);
     }
-    @Override public void recordStepOutcome(String stepId, StepOutcome outcome) {
-        registry.counter("flowpipe.step.outcome", "step", stepId, "outcome", outcome.name())
+
+    @Override
+    public void recordStepOutcome(String stepId, StepOutcome outcome) {
+        registry.counter("flowpipe.step.outcome", "step", stepId,
+                         "outcome", outcome.name())
+            .increment();
+    }
+
+    @Override
+    public void recordRetryAttempt(String stepId, int attempt) {
+        registry.counter("flowpipe.step.retries", "step", stepId)
             .increment();
     }
 }
@@ -368,10 +628,213 @@ Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
     .build();
 ```
 
-Need a per-call override (e.g., in a test)? Use the three-argument `execute(input, context, recorder)` overload. Recorder exceptions are caught and logged as `metrics.recorder_failed` — they never affect the pipeline result.
+`StepOutcome` has three values: `SUCCESS`, `FAILURE`, `SKIPPED`. Recorder exceptions are caught and logged as `metrics.recorder_failed` warnings — they never affect the pipeline result.
+
+For a per-call override (useful in tests), use the three-argument `execute(input, context, recorder)` overload.
+
+### SpanRecorder SPI
+
+Implement `SpanRecorder` for automatic distributed tracing around every step — no lifecycle code needed.
+
+```java
+import io.flowpipe.observability.SpanRecorder;
+import io.flowpipe.observability.StepOutcome;
+
+class OtelSpanRecorder implements SpanRecorder {
+    private final Tracer tracer;
+
+    @Override
+    public Object startStep(String stepId, RequestContext context) {
+        String traceId = context.get(TRACE_ID_KEY);
+        return tracer.spanBuilder(stepId)
+            .setAttribute("trace.id", traceId)
+            .startSpan();
+    }
+
+    @Override
+    public void finishStep(Object span, StepOutcome outcome, Throwable cause) {
+        Span otelSpan = (Span) span;
+        if (cause != null) otelSpan.recordException(cause);
+        otelSpan.setAttribute("outcome", outcome.name());
+        otelSpan.end();
+    }
+}
+
+Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
+    .then(fetchStep)
+    .then(enrichStep)
+    .withTracing(new OtelSpanRecorder(tracer))
+    .build();
+```
+
+`startStep` is called before the first attempt; `finishStep` is called after the final outcome — success, failure, or circuit-breaker trip. Skipped branch arm steps also fire both callbacks with `StepOutcome.SKIPPED`. Exceptions from either method are suppressed and logged as `tracing.recorder_failed` warnings.
+
+---
+
+## Input/output validation
+
+Attach validators to any `StepDescriptor` to enforce pre- and post-conditions on step data.
+
+```java
+import io.flowpipe.validation.ValidationException;
+import io.flowpipe.validation.Validator;
+
+Validator<String> nonBlank = value -> {
+    if (value == null || value.isBlank())
+        throw new ValidationException("value must not be blank");
+};
+
+Validator<UserProfile> profileComplete = profile -> {
+    if (profile.email() == null)
+        throw new ValidationException("profile must have an email");
+};
+
+StepDescriptor<String, UserProfile> desc = StepDescriptor
+    .builder("fetch-profile", String.class, UserProfile.class)
+    .inputValidator(nonBlank)       // runs before execute()
+    .outputValidator(profileComplete) // runs after execute(), before passing to next step
+    .build();
+```
+
+`ValidationException` propagates as `Failure.cause()` with `failedStepId()` equal to the step's id, just like any other step exception.
+
+---
+
+## Pipeline introspection
+
+`Pipeline.describe()` returns an immutable structural description of the pipeline — useful for diagnostics, audit logging, and tooling.
+
+```java
+Pipeline<String, OrderResult> pipeline = PipelineBuilder.start(String.class)
+    .then(parseStep)
+    .parallel2(OrderResult.class, combiner, enrichStep, validateStep)
+    .build();
+
+PipelineDescriptor desc = pipeline.describe();
+desc.inputType();   // String.class
+desc.outputType();  // OrderResult.class
+
+for (NodeDescriptor node : desc.nodes()) {
+    if (node instanceof NodeDescriptor.Step s) {
+        StepDescriptor<?, ?> step = s.step();
+        System.out.println("step: " + step.id()
+            + " retry=" + step.retryPolicy().maxAttempts()
+            + " timeout=" + step.timeoutPolicy().timeoutMs() + "ms");
+    }
+    if (node instanceof NodeDescriptor.Parallel p) {
+        System.out.println("parallel block with " + p.branches().size() + " branches");
+        p.branches().forEach(b -> System.out.println("  branch: " + b.id()));
+    }
+    if (node instanceof NodeDescriptor.Branch b) {
+        System.out.println("branch: " + b.branchId());
+        System.out.println("  ifTrue:  " + b.ifTrue().nodes().size() + " nodes");
+        System.out.println("  ifFalse: " + b.ifFalse().nodes().size() + " nodes");
+    }
+    if (node instanceof NodeDescriptor.Foreach f) {
+        System.out.println("foreach: " + f.step().id() + " concurrency=" + f.concurrency());
+    }
+}
+```
+
+`describe()` is pure — it reads no mutable state and is safe to call concurrently. It is **never read during execution** and adds no overhead to the request path.
+
+---
+
+## Test utilities
+
+The `flowpipe-test` module provides utilities for unit-testing steps and pipelines.
+
+### `StepHarness` — test a single step in isolation
+
+```java
+import io.flowpipe.test.StepHarness;
+
+StateKey<String> tenantKey = StateKey.of("tenant", String.class);
+
+StepHarness.Outcome<UserProfile> outcome = StepHarness.forStep(fetchProfileStep)
+    .withContext(RequestContext.builder().put(TRACE_KEY, "t-123").build())
+    .withState(tenantKey, "acme")
+    .invoke(fetchProfileStep, "user-42");
+
+assertThat(outcome.succeeded()).isTrue();
+assertThat(outcome.value().email()).isEqualTo("user-42@acme.com");
+assertThat(outcome.state().get(tenantKey)).isEqualTo("acme");
+```
+
+Use `outcome.error()` when testing failure paths.
+
+### `RecordingMetricsRecorder` — capture metrics in tests
+
+```java
+import io.flowpipe.test.RecordingMetricsRecorder;
+
+var recorder = new RecordingMetricsRecorder();
+
+pipeline.execute(input, RequestContext.empty(), recorder);
+
+List<RecordingMetricsRecorder.Event> events = recorder.events("fetch-profile");
+assertThat(events).anyMatch(e -> e instanceof RecordingMetricsRecorder.OutcomeEvent oe
+    && oe.outcome() == StepOutcome.SUCCESS);
+```
+
+### `RecordingPipelineLifecycle` — verify lifecycle hook invocations
+
+```java
+import io.flowpipe.test.RecordingPipelineLifecycle;
+
+var lifecycle = new RecordingPipelineLifecycle<String, String>();
+
+Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
+    .then(myStep)
+    .withLifecycle(lifecycle)
+    .build();
+
+pipeline.execute("hello");
+
+assertThat(lifecycle.onStartInvocations()).hasSize(1);
+assertThat(lifecycle.onFinishInvocations()).hasSize(1);
+assertThat(lifecycle.onErrorInvocations()).isEmpty();
+```
+
+### `Steps` — factory for common test steps
+
+```java
+import io.flowpipe.test.Steps;
+
+Step<String, String> identity  = Steps.identity("pass-through", String.class);
+Step<String, String> throwing  = Steps.throwing("bad-step", String.class, new RuntimeException("boom"));
+Step<String, Void>   noop      = Steps.noop("side-effect-only");
+Step<String, List<String>> split = Steps.split("split", ",");
+```
+
+---
 
 ## Project layout
 
-- `flowpipe-core` — library
-- `flowpipe-test` — test utilities (`StepHarness`, factory `Steps`, `RecordingMetricsRecorder`)
-- `openspec/changes/` — proposals, designs, and specs for upcoming work
+```
+flowpipe-core/
+  src/main/java/
+    io.flowpipe.api          — public surface: Step, StepDescriptor, StepContext,
+                               Result, Success, Failure, ExecutionTrace, TraceEntry,
+                               RetryPolicy, TimeoutPolicy, CircuitBreakerPolicy,
+                               StepTimeoutException, CircuitBreakerOpenException,
+                               PipelineDeadlineExceededException, PipelineDescriptor,
+                               NodeDescriptor, PipelineLifecycle, TriFunction, QuadFunction
+    io.flowpipe.state        — State, StateKey, RequestContext, ContextKey
+    io.flowpipe.validation   — Validator<T> SPI, ValidationException, NoOpValidator
+    io.flowpipe.observability — MetricsRecorder SPI, SpanRecorder SPI, StepOutcome,
+                               NoOpMetricsRecorder, NoOpSpanRecorder
+    io.flowpipe.engine       — Pipeline, PipelineBuilder, PipelineBuildException
+                               (internals: FailsafePolicies, EngineNode subtypes)
+
+flowpipe-test/
+  src/main/java/
+    io.flowpipe.test         — StepHarness, Steps, RecordingMetricsRecorder,
+                               RecordingPipelineLifecycle
+
+openspec/
+  specs/                     — feature specifications
+  changes/                   — proposals and designs for upcoming work
+```
+
+Runtime dependencies of `flowpipe-core`: `slf4j-api` and `dev.failsafe:failsafe:3.3.2` (resilience engine — retry, timeout, circuit breaker; kept as a private implementation detail, never exposed in the public API). No Spring, no external framework required.

@@ -256,7 +256,7 @@ class PipelineAsStepTest {
             .then(inner.asStep("inner"))
             .build();
 
-        outer.execute("x", RequestContext.of(tenantKey, "tenant-123"));
+        outer.execute("x", RequestContext.builder().put(tenantKey, "tenant-123").build());
 
         assertThat(captured.get()).isEqualTo("tenant-123");
     }
