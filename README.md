@@ -97,6 +97,36 @@ All policies on the descriptor are applied transparently by the framework — th
 
 A step returning `null` from `execute()` immediately surfaces as `Failure` with a `NullPointerException` naming the offending step, before any output validation runs.
 
+### Auto-writing step output to state with `withOutputKey`
+
+Declare `withOutputKey(StateKey<O>)` on a `StepDescriptor` and the framework automatically writes the step's validated output to the given state key after every successful execution — no `ctx.state().set(...)` inside `execute()`:
+
+```java
+StateKey<UserProfile> PROFILE_KEY = StateKey.of("profile", UserProfile.class);
+
+StepDescriptor<String, UserProfile> desc = StepDescriptor
+    .builder("fetch-profile", String.class, UserProfile.class)
+    .withRetry(RetryPolicy.fixed(3, 100))
+    .withOutputKey(PROFILE_KEY)  // framework writes output to state after execution
+    .build();
+
+Step<String, UserProfile> fetchProfile = new Step<>() {
+    @Override public StepDescriptor<String, UserProfile> describe() { return desc; }
+    @Override public UserProfile execute(String userId, StepContext ctx) {
+        return profileService.fetch(userId);  // no state.set() here
+    }
+};
+
+// Any downstream step reads from state directly
+Step<Order, OrderResult> charge = Step.of("charge", Order.class, OrderResult.class,
+    (order, ctx) -> {
+        UserProfile profile = ctx.state().get(PROFILE_KEY);  // just works
+        return paymentService.charge(order, profile);
+    });
+```
+
+The key is preserved across `withRetry(...)`, `withTimeout(...)`, and `withCircuitBreaker(...)` calls. Output is only written on success — a failing step never mutates state. Works for sequential steps, parallel branch steps, and foreach element steps.
+
 ### Accessing shared state and request context
 
 The `StepContext` passed to every `execute()` call provides two data channels:
@@ -266,6 +296,41 @@ Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
 ```
 
 The map keys must match the corresponding step's `StepDescriptor.id()`. A mismatch is caught at `build()` and throws `PipelineBuildException`.
+
+### Combiner-free parallel — outputs go to state, no holder type needed
+
+When branches don't need to be merged into a typed result, use the combiner-free overloads: `parallel2(stepA, stepB)`, `parallel3`, `parallel4`, or `parallelN(List<Step<O,?>>)`. Each branch must declare `withOutputKey(...)` on its `StepDescriptor` — the framework writes each branch's output to state after execution, and the current pipeline value passes through unchanged.
+
+```java
+StateKey<List<TextResult>>  TEXT_KEY  = StateKey.of("text-results",  List.class);
+StateKey<List<ImageResult>> IMAGE_KEY = StateKey.of("image-results", List.class);
+
+Step<String, List<TextResult>> textSearch = new Step<>() {
+    StepDescriptor<String, List<TextResult>> desc = StepDescriptor
+        .builder("text-search", String.class, List.class)
+        .withOutputKey(TEXT_KEY)   // ← required for combiner-free parallel
+        .build();
+    @Override public StepDescriptor<String, List<TextResult>> describe() { return desc; }
+    @Override public List<TextResult> execute(String query, StepContext ctx) {
+        return searchService.searchText(query);
+    }
+};
+
+// imageSearch declared similarly with .withOutputKey(IMAGE_KEY)
+
+Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
+    .parallel2(textSearch, imageSearch)   // no Class<R> or combiner — input passes through
+    .then(Step.of("assemble", String.class, String.class, (query, ctx) -> {
+        List<TextResult>  text   = ctx.state().get(TEXT_KEY);   // results in state
+        List<ImageResult> images = ctx.state().get(IMAGE_KEY);
+        return renderResults(query, text, images);
+    }))
+    .build();
+```
+
+`build()` enforces that every branch in a combiner-free block declares `withOutputKey`. If any branch is missing it, `build()` throws `PipelineBuildException` naming the offending branch(es).
+
+Combiner-based and combiner-free blocks can be freely mixed in the same pipeline.
 
 ### Executor
 
