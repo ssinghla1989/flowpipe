@@ -1,4 +1,4 @@
-package com.gpc.commons.validation;
+package io.flowpipe.commons.validation;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.networknt.schema.JsonSchema;

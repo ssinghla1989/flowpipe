@@ -1,4 +1,4 @@
-package com.gpc.commons.security;
+package io.flowpipe.commons.security;
 
 import io.flowpipe.api.Step;
 import io.flowpipe.api.StepContext;

@@ -1,4 +1,4 @@
-package com.gpc.commons.http;
+package io.flowpipe.commons.http;
 
 import com.sun.net.httpserver.HttpServer;
 import io.flowpipe.api.Failure;
@@ -6,7 +6,6 @@ import io.flowpipe.api.Result;
 import io.flowpipe.api.Success;
 import io.flowpipe.engine.Pipeline;
 import io.flowpipe.state.RequestContext;
-import io.flowpipe.state.State;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -72,13 +71,13 @@ class HttpCallStepTest {
     @Test
     void returnsBodyOnSuccess() {
         var step = new HttpCallStep("call.api");
-        var pipeline = Pipeline.builder(HttpRequest.class, String.class).then(step).build();
+        var pipeline = Pipeline.builder(HttpRequest.class).then(step).build();
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/ok"))
                 .GET().build();
 
-        Result<String> result = pipeline.execute(request, new State(), RequestContext.empty());
+        Result<String> result = pipeline.execute(request, RequestContext.empty());
 
         assertThat(result).isInstanceOf(Success.class);
         assertThat(((Success<String>) result).value()).isEqualTo("{\"status\":\"ok\"}");
@@ -87,13 +86,13 @@ class HttpCallStepTest {
     @Test
     void failsWithHttpCallExceptionOn404() {
         var step = new HttpCallStep("call.api");
-        var pipeline = Pipeline.builder(HttpRequest.class, String.class).then(step).build();
+        var pipeline = Pipeline.builder(HttpRequest.class).then(step).build();
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/not-found"))
                 .GET().build();
 
-        Result<String> result = pipeline.execute(request, new State(), RequestContext.empty());
+        Result<String> result = pipeline.execute(request, RequestContext.empty());
 
         assertThat(result).isInstanceOf(Failure.class);
         var ex = (HttpCallException) ((Failure<String>) result).cause();
@@ -104,13 +103,13 @@ class HttpCallStepTest {
     @Test
     void failsWithHttpCallExceptionOn500() {
         var step = new HttpCallStep("call.api");
-        var pipeline = Pipeline.builder(HttpRequest.class, String.class).then(step).build();
+        var pipeline = Pipeline.builder(HttpRequest.class).then(step).build();
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/server-error"))
                 .GET().build();
 
-        Result<String> result = pipeline.execute(request, new State(), RequestContext.empty());
+        Result<String> result = pipeline.execute(request, RequestContext.empty());
 
         assertThat(result).isInstanceOf(Failure.class);
         assertThat(((Failure<String>) result).cause()).isInstanceOf(HttpCallException.class);
@@ -120,13 +119,13 @@ class HttpCallStepTest {
     @Test
     void failsWhenHostUnreachable() {
         var step = new HttpCallStep("call.api");
-        var pipeline = Pipeline.builder(HttpRequest.class, String.class).then(step).build();
+        var pipeline = Pipeline.builder(HttpRequest.class).then(step).build();
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:1/unreachable"))
                 .GET().build();
 
-        Result<String> result = pipeline.execute(request, new State(), RequestContext.empty());
+        Result<String> result = pipeline.execute(request, RequestContext.empty());
 
         assertThat(result).isInstanceOf(Failure.class);
         assertThat(((Failure<String>) result).cause()).isNotInstanceOf(HttpCallException.class);
@@ -137,7 +136,7 @@ class HttpCallStepTest {
     @Test
     void withRetryReturnsDifferentInstanceWithPolicyApplied() {
         var step = new HttpCallStep("call.api");
-        var withRetry = step.withRetry(io.flowpipe.api.RetryPolicy.builder().maxAttempts(3).build());
+        var withRetry = step.withRetry(io.flowpipe.api.RetryPolicy.fixed(3, 0));
 
         assertThat(withRetry).isNotSameAs(step);
         assertThat(withRetry.describe().retryPolicy().maxAttempts()).isEqualTo(3);

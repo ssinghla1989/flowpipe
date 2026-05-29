@@ -1,11 +1,10 @@
-package com.gpc.commons.security;
+package io.flowpipe.commons.security;
 
 import io.flowpipe.api.Failure;
 import io.flowpipe.api.Result;
 import io.flowpipe.api.Success;
 import io.flowpipe.engine.Pipeline;
 import io.flowpipe.state.RequestContext;
-import io.flowpipe.state.State;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.ExpiredJwtException;
 import io.jsonwebtoken.Jwts;
@@ -59,10 +58,10 @@ class JwtValidationStepTest {
     @Test
     void validHmacTokenReturnsClaimsWithCorrectSubject() {
         var step = JwtValidationStep.hmac("auth.validate-jwt", hmacKey);
-        var pipeline = Pipeline.builder(String.class, Claims.class).then(step).build();
+        var pipeline = Pipeline.builder(String.class).then(step).build();
 
         String token = mintToken(hmacKey, "user-123", Instant.now().plus(1, ChronoUnit.HOURS));
-        Result<Claims> result = pipeline.execute(token, new State(), RequestContext.empty());
+        Result<Claims> result = pipeline.execute(token, RequestContext.empty());
 
         assertThat(result).isInstanceOf(Success.class);
         assertThat(((Success<Claims>) result).value().getSubject()).isEqualTo("user-123");
@@ -71,10 +70,10 @@ class JwtValidationStepTest {
     @Test
     void bearerPrefixIsStrippedAutomatically() {
         var step = JwtValidationStep.hmac("auth.validate-jwt", hmacKey);
-        var pipeline = Pipeline.builder(String.class, Claims.class).then(step).build();
+        var pipeline = Pipeline.builder(String.class).then(step).build();
 
         String token = "Bearer " + mintToken(hmacKey, "user-123", Instant.now().plus(1, ChronoUnit.HOURS));
-        Result<Claims> result = pipeline.execute(token, new State(), RequestContext.empty());
+        Result<Claims> result = pipeline.execute(token, RequestContext.empty());
 
         assertThat(result).isInstanceOf(Success.class);
         assertThat(((Success<Claims>) result).value().getSubject()).isEqualTo("user-123");
@@ -83,10 +82,10 @@ class JwtValidationStepTest {
     @Test
     void expiredHmacTokenFails() {
         var step = JwtValidationStep.hmac("auth.validate-jwt", hmacKey);
-        var pipeline = Pipeline.builder(String.class, Claims.class).then(step).build();
+        var pipeline = Pipeline.builder(String.class).then(step).build();
 
         String token = mintToken(hmacKey, "user-123", Instant.now().minus(1, ChronoUnit.HOURS));
-        Result<Claims> result = pipeline.execute(token, new State(), RequestContext.empty());
+        Result<Claims> result = pipeline.execute(token, RequestContext.empty());
 
         assertThat(result).isInstanceOf(Failure.class);
         assertThat(((Failure<Claims>) result).cause()).isInstanceOf(ExpiredJwtException.class);
@@ -95,11 +94,11 @@ class JwtValidationStepTest {
     @Test
     void tokenSignedWithWrongKeyFails() {
         var step = JwtValidationStep.hmac("auth.validate-jwt", hmacKey);
-        var pipeline = Pipeline.builder(String.class, Claims.class).then(step).build();
+        var pipeline = Pipeline.builder(String.class).then(step).build();
 
         SecretKey wrongKey = Jwts.SIG.HS256.key().build();
         String token = mintToken(wrongKey, "user-123", Instant.now().plus(1, ChronoUnit.HOURS));
-        Result<Claims> result = pipeline.execute(token, new State(), RequestContext.empty());
+        Result<Claims> result = pipeline.execute(token, RequestContext.empty());
 
         assertThat(result).isInstanceOf(Failure.class);
         assertThat(((Failure<Claims>) result).cause())
@@ -109,9 +108,9 @@ class JwtValidationStepTest {
     @Test
     void malformedTokenFails() {
         var step = JwtValidationStep.hmac("auth.validate-jwt", hmacKey);
-        var pipeline = Pipeline.builder(String.class, Claims.class).then(step).build();
+        var pipeline = Pipeline.builder(String.class).then(step).build();
 
-        Result<Claims> result = pipeline.execute("not.a.jwt", new State(), RequestContext.empty());
+        Result<Claims> result = pipeline.execute("not.a.jwt", RequestContext.empty());
 
         assertThat(result).isInstanceOf(Failure.class);
         assertThat(((Failure<Claims>) result).cause())
@@ -123,10 +122,10 @@ class JwtValidationStepTest {
     @Test
     void validRsaTokenReturnsClaimsWithCorrectSubject() {
         var step = JwtValidationStep.asymmetric("auth.validate-jwt", rsaKeyPair.getPublic());
-        var pipeline = Pipeline.builder(String.class, Claims.class).then(step).build();
+        var pipeline = Pipeline.builder(String.class).then(step).build();
 
         String token = mintToken(rsaKeyPair.getPrivate(), "svc-account", Instant.now().plus(1, ChronoUnit.HOURS));
-        Result<Claims> result = pipeline.execute(token, new State(), RequestContext.empty());
+        Result<Claims> result = pipeline.execute(token, RequestContext.empty());
 
         assertThat(result).isInstanceOf(Success.class);
         assertThat(((Success<Claims>) result).value().getSubject()).isEqualTo("svc-account");
@@ -137,7 +136,7 @@ class JwtValidationStepTest {
     @Test
     void withRetryReturnsDifferentInstanceWithPolicyApplied() {
         var step = JwtValidationStep.hmac("auth.validate-jwt", hmacKey);
-        var withRetry = step.withRetry(io.flowpipe.api.RetryPolicy.builder().maxAttempts(2).build());
+        var withRetry = step.withRetry(io.flowpipe.api.RetryPolicy.fixed(2, 0));
 
         assertThat(withRetry).isNotSameAs(step);
         assertThat(withRetry.describe().retryPolicy().maxAttempts()).isEqualTo(2);

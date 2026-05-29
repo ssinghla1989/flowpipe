@@ -115,7 +115,7 @@ public class FetchProfileStep implements Step<String, UserProfile> {
 }
 ```
 
-Use this pattern for steps in shared libraries (like `gpc-commons`) or when the step needs constructor-injected dependencies that vary per caller.
+Use this pattern for steps in shared libraries (like `flowpipe-commons`) or when the step needs constructor-injected dependencies that vary per caller.
 
 ### Auto-writing step output to state with `withOutputKey`
 

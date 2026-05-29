@@ -1,11 +1,10 @@
-package com.gpc.commons.validation;
+package io.flowpipe.commons.validation;
 
 import io.flowpipe.api.Failure;
 import io.flowpipe.api.Result;
 import io.flowpipe.api.Success;
 import io.flowpipe.engine.Pipeline;
 import io.flowpipe.state.RequestContext;
-import io.flowpipe.state.State;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -70,9 +69,9 @@ class JsonSchemaValidationStepTest {
     @Test
     void passesValidJsonThrough() {
         var step = new JsonSchemaValidationStep("validate.order", "/schemas/order-request.json");
-        var pipeline = Pipeline.builder(String.class, String.class).then(step).build();
+        var pipeline = Pipeline.builder(String.class).then(step).build();
 
-        Result<String> result = pipeline.execute(VALID_ORDER.strip(), new State(), RequestContext.empty());
+        Result<String> result = pipeline.execute(VALID_ORDER.strip(), RequestContext.empty());
 
         assertThat(result).isInstanceOf(Success.class);
         assertThat(((Success<String>) result).value()).isEqualTo(VALID_ORDER.strip());
@@ -81,9 +80,9 @@ class JsonSchemaValidationStepTest {
     @Test
     void failsWhenRequiredFieldMissing() {
         var step = new JsonSchemaValidationStep("validate.order", "/schemas/order-request.json");
-        var pipeline = Pipeline.builder(String.class, String.class).then(step).build();
+        var pipeline = Pipeline.builder(String.class).then(step).build();
 
-        Result<String> result = pipeline.execute(MISSING_FIELD.strip(), new State(), RequestContext.empty());
+        Result<String> result = pipeline.execute(MISSING_FIELD.strip(), RequestContext.empty());
 
         assertThat(result).isInstanceOf(Failure.class);
         var failure = (Failure<String>) result;
@@ -98,9 +97,9 @@ class JsonSchemaValidationStepTest {
     @Test
     void failsWhenConstraintViolated() {
         var step = new JsonSchemaValidationStep("validate.order", "/schemas/order-request.json");
-        var pipeline = Pipeline.builder(String.class, String.class).then(step).build();
+        var pipeline = Pipeline.builder(String.class).then(step).build();
 
-        Result<String> result = pipeline.execute(NEGATIVE_QUANTITY.strip(), new State(), RequestContext.empty());
+        Result<String> result = pipeline.execute(NEGATIVE_QUANTITY.strip(), RequestContext.empty());
 
         assertThat(result).isInstanceOf(Failure.class);
         var ex = (JsonSchemaValidationException) ((Failure<String>) result).cause();
@@ -110,9 +109,9 @@ class JsonSchemaValidationStepTest {
     @Test
     void failsOnMalformedJson() {
         var step = new JsonSchemaValidationStep("validate.order", "/schemas/order-request.json");
-        var pipeline = Pipeline.builder(String.class, String.class).then(step).build();
+        var pipeline = Pipeline.builder(String.class).then(step).build();
 
-        Result<String> result = pipeline.execute("{not-json}", new State(), RequestContext.empty());
+        Result<String> result = pipeline.execute("{not-json}", RequestContext.empty());
 
         assertThat(result).isInstanceOf(Failure.class);
         // Jackson parse error, not a schema violation
@@ -125,7 +124,7 @@ class JsonSchemaValidationStepTest {
     @Test
     void withRetryReturnsDifferentInstanceWithPolicyApplied() {
         var step = new JsonSchemaValidationStep("validate.order", "/schemas/order-request.json");
-        var withRetry = step.withRetry(io.flowpipe.api.RetryPolicy.builder().maxAttempts(2).build());
+        var withRetry = step.withRetry(io.flowpipe.api.RetryPolicy.fixed(2, 0));
 
         assertThat(withRetry).isNotSameAs(step);
         assertThat(withRetry.describe().retryPolicy().maxAttempts()).isEqualTo(2);
@@ -144,7 +143,7 @@ class JsonSchemaValidationStepTest {
     @Test
     void policyOverridesAreChainable() {
         var step = new JsonSchemaValidationStep("validate.order", "/schemas/order-request.json")
-                .withRetry(io.flowpipe.api.RetryPolicy.builder().maxAttempts(3).build())
+                .withRetry(io.flowpipe.api.RetryPolicy.fixed(3, 0))
                 .withTimeout(io.flowpipe.api.TimeoutPolicy.ofMillis(200));
 
         assertThat(step.describe().retryPolicy().maxAttempts()).isEqualTo(3);
@@ -156,13 +155,13 @@ class JsonSchemaValidationStepTest {
     @Test
     void usableAsFirstPipelineStepForRequestValidation() {
         var validateRequest = new JsonSchemaValidationStep("validate.request", "/schemas/order-request.json");
-        var pipeline = Pipeline.builder(String.class, String.class)
+        var pipeline = Pipeline.builder(String.class)
                 .then(validateRequest)
                 .build();
 
-        assertThat(pipeline.execute(VALID_ORDER.strip(), new State(), RequestContext.empty()))
+        assertThat(pipeline.execute(VALID_ORDER.strip(), RequestContext.empty()))
                 .isInstanceOf(Success.class);
-        assertThat(pipeline.execute(MISSING_FIELD.strip(), new State(), RequestContext.empty()))
+        assertThat(pipeline.execute(MISSING_FIELD.strip(), RequestContext.empty()))
                 .isInstanceOf(Failure.class);
     }
 }

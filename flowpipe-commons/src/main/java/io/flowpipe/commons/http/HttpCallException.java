@@ -1,5 +1,6 @@
-package com.gpc.commons.http;
+package io.flowpipe.commons.http;
 
+@SuppressWarnings("serial")
 public final class HttpCallException extends RuntimeException {
 
     private final int statusCode;

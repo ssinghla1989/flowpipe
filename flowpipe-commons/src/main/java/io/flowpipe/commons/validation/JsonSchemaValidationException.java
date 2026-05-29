@@ -1,10 +1,11 @@
-package com.gpc.commons.validation;
+package io.flowpipe.commons.validation;
 
 import com.networknt.schema.ValidationMessage;
 
 import java.util.Set;
 import java.util.stream.Collectors;
 
+@SuppressWarnings("serial")
 public final class JsonSchemaValidationException extends RuntimeException {
 
     private final String stepId;

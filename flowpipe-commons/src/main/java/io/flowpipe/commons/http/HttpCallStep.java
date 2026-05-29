@@ -1,4 +1,4 @@
-package com.gpc.commons.http;
+package io.flowpipe.commons.http;
 
 import io.flowpipe.api.Step;
 import io.flowpipe.api.StepContext;
