@@ -31,7 +31,7 @@ class StepBuilderTest {
     }
 
     // -------------------------------------------------------------------------
-    // 2. Minimal build — defaults match Step.of() defaults
+    // 2. Minimal build — verify policy defaults
     // -------------------------------------------------------------------------
 
     @Test
@@ -39,7 +39,7 @@ class StepBuilderTest {
         Step<String, String> viaBuilder = Step.builder("s", String.class, String.class)
             .execute((in, ctx) -> in)
             .build();
-        Step<String, String> viaOf = Step.of("s", String.class, String.class, (in, ctx) -> in);
+        Step<String, String> viaOf = Step.builder("s", String.class, String.class).execute((in, ctx) -> in).build();
 
         assertThat(viaBuilder.describe().retryPolicy()).isEqualTo(viaOf.describe().retryPolicy());
         assertThat(viaBuilder.describe().timeoutPolicy()).isEqualTo(viaOf.describe().timeoutPolicy());

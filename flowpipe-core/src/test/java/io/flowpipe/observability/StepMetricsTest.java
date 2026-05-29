@@ -28,7 +28,7 @@ class StepMetricsTest {
 
     @Test
     void builder_default_is_no_op_when_with_metrics_not_called() {
-        Step<String, String> s = Step.of("s", String.class, String.class, (in, ctx) -> in);
+        Step<String, String> s = Step.builder("s", String.class, String.class).execute((in, ctx) -> in).build();
         Pipeline<String, String> defaulted = PipelineBuilder.start(String.class).then(s).build();
 
         TestMetricsRecorder override = new TestMetricsRecorder();
@@ -44,7 +44,7 @@ class StepMetricsTest {
     void with_metrics_replaces_previously_configured_recorder() {
         TestMetricsRecorder a = new TestMetricsRecorder();
         TestMetricsRecorder b = new TestMetricsRecorder();
-        Step<String, String> s = Step.of("s", String.class, String.class, (in, ctx) -> in);
+        Step<String, String> s = Step.builder("s", String.class, String.class).execute((in, ctx) -> in).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
             .then(s)
@@ -61,7 +61,7 @@ class StepMetricsTest {
     void per_call_recorder_override_receives_only_that_call_and_default_receives_subsequent() {
         TestMetricsRecorder defaultRec = new TestMetricsRecorder();
         TestMetricsRecorder override = new TestMetricsRecorder();
-        Step<String, String> s = Step.of("s", String.class, String.class, (in, ctx) -> in);
+        Step<String, String> s = Step.builder("s", String.class, String.class).execute((in, ctx) -> in).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
             .then(s)
@@ -80,7 +80,7 @@ class StepMetricsTest {
     @Test
     void success_path_records_one_duration_attempts_outcome_per_step() {
         TestMetricsRecorder rec = new TestMetricsRecorder();
-        Step<Integer, Integer> s1 = Step.of("s1", Integer.class, Integer.class, (i, ctx) -> i);
+        Step<Integer, Integer> s1 = Step.builder("s1", Integer.class, Integer.class).execute((i, ctx) -> i).build();
 
         Pipeline<Integer, Integer> pipeline = PipelineBuilder.start(Integer.class)
             .then(s1)
@@ -102,9 +102,8 @@ class StepMetricsTest {
     @Test
     void failure_path_records_failure_for_failing_step_and_success_for_prior_step() {
         TestMetricsRecorder rec = new TestMetricsRecorder();
-        Step<Integer, Integer> ok = Step.of("ok", Integer.class, Integer.class, (i, ctx) -> i);
-        Step<Integer, Integer> bad = Step.of("bad", Integer.class, Integer.class,
-            (i, ctx) -> { throw new RuntimeException("boom"); });
+        Step<Integer, Integer> ok = Step.builder("ok", Integer.class, Integer.class).execute((i, ctx) -> i).build();
+        Step<Integer, Integer> bad = Step.builder("bad", Integer.class, Integer.class).execute((i, ctx) -> { throw new RuntimeException("boom"); }).build();
 
         Pipeline<Integer, Integer> pipeline = PipelineBuilder.start(Integer.class)
             .then(ok).then(bad)
@@ -126,7 +125,7 @@ class StepMetricsTest {
     @Test
     void recorder_duration_equals_trace_entry_duration() {
         TestMetricsRecorder rec = new TestMetricsRecorder();
-        Step<Integer, Integer> s = Step.of("s", Integer.class, Integer.class, (i, ctx) -> i);
+        Step<Integer, Integer> s = Step.builder("s", Integer.class, Integer.class).execute((i, ctx) -> i).build();
 
         Pipeline<Integer, Integer> pipeline = PipelineBuilder.start(Integer.class)
             .then(s)

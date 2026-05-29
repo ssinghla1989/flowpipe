@@ -27,8 +27,8 @@ class PipelineResultTest {
 
     @Test
     void success_carries_final_value_and_ordered_trace() {
-        Step<Integer, Integer> a = Step.of("a", Integer.class, Integer.class, (i, ctx) -> i + 1);
-        Step<Integer, Integer> b = Step.of("b", Integer.class, Integer.class, (i, ctx) -> i * 2);
+        Step<Integer, Integer> a = Step.builder("a", Integer.class, Integer.class).execute((i, ctx) -> i + 1).build();
+        Step<Integer, Integer> b = Step.builder("b", Integer.class, Integer.class).execute((i, ctx) -> i * 2).build();
 
         Pipeline<Integer, Integer> pipeline = PipelineBuilder.start(Integer.class)
             .then(a).then(b).build();
@@ -45,10 +45,9 @@ class PipelineResultTest {
     @Test
     void failure_trace_includes_executed_steps_up_to_and_including_failing_step() {
         RuntimeException boom = new RuntimeException("boom");
-        Step<String, String> a = Step.of("a", String.class, String.class, (s, ctx) -> s);
-        Step<String, String> b = Step.of("b", String.class, String.class,
-            (s, ctx) -> { throw boom; });
-        Step<String, String> c = Step.of("c", String.class, String.class, (s, ctx) -> s);
+        Step<String, String> a = Step.builder("a", String.class, String.class).execute((s, ctx) -> s).build();
+        Step<String, String> b = Step.builder("b", String.class, String.class).execute((s, ctx) -> { throw boom; }).build();
+        Step<String, String> c = Step.builder("c", String.class, String.class).execute((s, ctx) -> s).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
             .then(a).then(b).then(c).build();
@@ -63,8 +62,8 @@ class PipelineResultTest {
 
     @Test
     void every_trace_entry_attempts_equals_one() {
-        Step<Integer, Integer> a = Step.of("a", Integer.class, Integer.class, (i, ctx) -> i);
-        Step<Integer, Integer> b = Step.of("b", Integer.class, Integer.class, (i, ctx) -> i);
+        Step<Integer, Integer> a = Step.builder("a", Integer.class, Integer.class).execute((i, ctx) -> i).build();
+        Step<Integer, Integer> b = Step.builder("b", Integer.class, Integer.class).execute((i, ctx) -> i).build();
 
         Pipeline<Integer, Integer> pipeline = PipelineBuilder.start(Integer.class)
             .then(a).then(b).build();

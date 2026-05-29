@@ -36,8 +36,7 @@ class OutputKeyTest {
         AtomicReference<String> observed = new AtomicReference<>();
 
         Step<String, String> producer = withKey("producer", String.class, String.class, KEY, s -> "produced-" + s);
-        Step<String, String> consumer = Step.of("consumer", String.class, String.class,
-            (s, ctx) -> { observed.set(ctx.state().get(KEY)); return s; });
+        Step<String, String> consumer = Step.builder("consumer", String.class, String.class).execute((s, ctx) -> { observed.set(ctx.state().get(KEY)); return s; }).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
             .then(producer)
@@ -54,11 +53,10 @@ class OutputKeyTest {
         StateKey<String> KEY = StateKey.of("should-be-absent", String.class);
         AtomicReference<String> observed = new AtomicReference<>("sentinel");
 
-        Step<String, String> checker = Step.of("checker", String.class, String.class,
-            (s, ctx) -> { observed.set(ctx.state().get(KEY)); return s; });
+        Step<String, String> checker = Step.builder("checker", String.class, String.class).execute((s, ctx) -> { observed.set(ctx.state().get(KEY)); return s; }).build();
 
         PipelineBuilder.start(String.class)
-            .then(Step.of("pass", String.class, String.class, (s, ctx) -> s))
+            .then(Step.builder("pass", String.class, String.class).execute((s, ctx) -> s).build())
             .then(checker)
             .build()
             .execute("x");
@@ -85,8 +83,7 @@ class OutputKeyTest {
             }
         };
 
-        Step<String, String> reader = Step.of("reader", String.class, String.class,
-            (s, ctx) -> { observed.set(ctx.state().get(KEY)); return s; });
+        Step<String, String> reader = Step.builder("reader", String.class, String.class).execute((s, ctx) -> { observed.set(ctx.state().get(KEY)); return s; }).build();
 
         PipelineBuilder.start(String.class).then(flaky).then(reader).build().execute("x");
 
@@ -106,8 +103,7 @@ class OutputKeyTest {
             @Override public StepDescriptor<String, String> describe() { return desc; }
             @Override public String execute(String input, StepContext ctx) { throw new RuntimeException("boom"); }
         };
-        Step<String, String> reader = Step.of("reader", String.class, String.class,
-            (s, ctx) -> { observed.set(ctx.state().get(KEY)); return s; });
+        Step<String, String> reader = Step.builder("reader", String.class, String.class).execute((s, ctx) -> { observed.set(ctx.state().get(KEY)); return s; }).build();
 
         Result<String> result = PipelineBuilder.start(String.class)
             .then(failing)
@@ -156,10 +152,7 @@ class OutputKeyTest {
             (Pipeline<List<String>, List<String>>) (Pipeline) PipelineBuilder
                 .start((Class<List<String>>) (Class<?>) List.class)
                 .foreach(itemStep)
-                .then(Step.of("reader",
-                    (Class<List<String>>) (Class<?>) List.class,
-                    (Class<List<String>>) (Class<?>) List.class,
-                    (list, ctx) -> { observed.set(ctx.state().get(KEY)); return list; }))
+                .then(Step.builder("reader", (Class<List<String>>) (Class<?>) List.class, (Class<List<String>>) (Class<?>) List.class).execute((list, ctx) -> { observed.set(ctx.state().get(KEY)); return list; }).build())
                 .build();
 
         pipeline.execute(List.of("a", "b", "c"));
@@ -181,11 +174,11 @@ class OutputKeyTest {
         AtomicReference<String> seenA = new AtomicReference<>();
         AtomicReference<Integer> seenB = new AtomicReference<>();
 
-        Step<String, String> reader = Step.of("reader", String.class, String.class, (s, ctx) -> {
+        Step<String, String> reader = Step.builder("reader", String.class, String.class).execute((s, ctx) -> {
             seenA.set(ctx.state().get(KEY_A));
             seenB.set(ctx.state().get(KEY_B));
             return s;
-        });
+        }).build();
 
         ExecutorService exec = Executors.newFixedThreadPool(2);
         try {
@@ -219,7 +212,7 @@ class OutputKeyTest {
                     withKey("step-a", String.class, String.class, KEY_A, s -> "A"),
                     withKey("step-b", String.class, String.class, KEY_B, s -> "B"))
                 .withExecutor(exec)
-                .then(Step.of("next", String.class, String.class, (s, ctx) -> { pipelineValue.set(s); return s; }))
+                .then(Step.builder("next", String.class, String.class).execute((s, ctx) -> { pipelineValue.set(s); return s; }).build())
                 .build()
                 .execute("original");
 
@@ -246,10 +239,10 @@ class OutputKeyTest {
                     withKey("b", String.class, String.class, KEY_B, s -> "B"),
                     withKey("c", String.class, String.class, KEY_C, s -> "C"))
                 .withExecutor(exec)
-                .then(Step.of("reader", String.class, String.class, (s, ctx) -> {
+                .then(Step.builder("reader", String.class, String.class).execute((s, ctx) -> {
                     seenC.set(ctx.state().get(KEY_C));
                     return s;
-                }))
+                }).build())
                 .build()
                 .execute("x");
 
@@ -274,8 +267,7 @@ class OutputKeyTest {
                     withKey("c", String.class, String.class, StateKey.of("c", String.class), s -> "C"),
                     withKey("d", String.class, String.class, KEY_D, s -> "D"))
                 .withExecutor(exec)
-                .then(Step.of("reader", String.class, String.class,
-                    (s, ctx) -> { seenD.set(ctx.state().get(KEY_D)); return s; }))
+                .then(Step.builder("reader", String.class, String.class).execute((s, ctx) -> { seenD.set(ctx.state().get(KEY_D)); return s; }).build())
                 .build()
                 .execute("x");
 
@@ -301,11 +293,11 @@ class OutputKeyTest {
                     withKey("a", String.class, String.class, KEY_A, s -> "A"),
                     withKey("b", String.class, String.class, KEY_B, s -> "B")))
                 .withExecutor(exec)
-                .then(Step.of("reader", String.class, String.class, (s, ctx) -> {
+                .then(Step.builder("reader", String.class, String.class).execute((s, ctx) -> {
                     seenA.set(ctx.state().get(KEY_A));
                     seenB.set(ctx.state().get(KEY_B));
                     return s;
-                }))
+                }).build())
                 .build()
                 .execute("x");
 
@@ -323,7 +315,7 @@ class OutputKeyTest {
             PipelineBuilder.start(String.class)
                 .parallel2(
                     withKey("with-key", String.class, String.class, StateKey.of("k", String.class), s -> s),
-                    Step.of("without-key", String.class, String.class, (s, ctx) -> s))
+                    Step.builder("without-key", String.class, String.class).execute((s, ctx) -> s).build())
                 .build()
         ).isInstanceOf(PipelineBuildException.class)
             .hasMessageContaining("without-key")
@@ -337,7 +329,7 @@ class OutputKeyTest {
             PipelineBuilder.start(String.class)
                 .parallelN(List.of(
                     withKey("a", String.class, String.class, StateKey.of("k", String.class), s -> s),
-                    Step.of("b", String.class, String.class, (s, ctx) -> s)))
+                    Step.builder("b", String.class, String.class).execute((s, ctx) -> s).build()))
                 .build()
         ).isInstanceOf(PipelineBuildException.class)
             .hasMessageContaining("b")
@@ -388,12 +380,12 @@ class OutputKeyTest {
                 .withExecutor(exec)
                 // combiner block: produces a combined result
                 .parallel2(String.class, (l, r) -> l + "|" + r,
-                    Step.of("left", String.class, String.class, (s, ctx) -> "L:" + s),
-                    Step.of("right", String.class, String.class, (s, ctx) -> "R:" + s))
-                .then(Step.of("reader", String.class, String.class, (s, ctx) -> {
+                    Step.builder("left", String.class, String.class).execute((s, ctx) -> "L:" + s).build(),
+                    Step.builder("right", String.class, String.class).execute((s, ctx) -> "R:" + s).build())
+                .then(Step.builder("reader", String.class, String.class).execute((s, ctx) -> {
                     sideValue.set(ctx.state().get(SIDE_KEY));
                     return s;
-                }))
+                }).build())
                 .build()
                 .execute("x");
 

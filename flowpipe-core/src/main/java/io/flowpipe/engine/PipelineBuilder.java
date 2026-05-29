@@ -276,8 +276,8 @@ public final class PipelineBuilder<I, O> {
         Objects.requireNonNull(branchId, "branchId");
         Objects.requireNonNull(predicate, "predicate");
         Objects.requireNonNull(ifTrue, "ifTrue");
-        Step<O, O> passThrough = Step.of(
-            branchId + ".pass-through", currentOutputType, currentOutputType, (v, ctx) -> v);
+        Step<O, O> passThrough = Step.builder(
+            branchId + ".pass-through", currentOutputType, currentOutputType).execute((v, ctx) -> v).build();
         Pipeline<O, O> passThroughPipeline = PipelineBuilder.start(currentOutputType)
             .then(passThrough)
             .build();
@@ -325,12 +325,8 @@ public final class PipelineBuilder<I, O> {
         return new PipelineBuilder<>(inputType, ifTrue.outputType(), nodes, metricsRecorder, spanRecorder, executor, castLifecycle(lifecycle), deadlineMs);
     }
 
-    public <E, R> PipelineBuilder<I, List<R>> foreach(Step<E, R> step) {
-        return foreach(step, 1);
-    }
-
     @SuppressWarnings({"unchecked", "rawtypes"})
-    public <E, R> PipelineBuilder<I, List<R>> foreach(Step<E, R> step, int concurrency) {
+    public <E, R> PipelineBuilder<I, List<R>> foreach(Step<E, R> step) {
         ensureUsable();
         Objects.requireNonNull(step, "step");
         if (!currentOutputType.equals(List.class)) {
@@ -338,11 +334,7 @@ public final class PipelineBuilder<I, O> {
                 "foreach requires the current pipeline output to be List, but was "
                     + currentOutputType.getName());
         }
-        if (concurrency < 1) {
-            throw new PipelineBuildException(
-                "foreach concurrency must be >= 1, but was " + concurrency);
-        }
-        nodes.add(new ForeachNode<>(step, concurrency));
+        nodes.add(new ForeachNode<>(step));
         consumed = true;
         return new PipelineBuilder<>(inputType, (Class<List<R>>) (Class) List.class, nodes, metricsRecorder, spanRecorder, executor,
             castLifecycle(lifecycle), deadlineMs);

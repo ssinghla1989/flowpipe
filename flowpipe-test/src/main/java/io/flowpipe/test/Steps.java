@@ -10,17 +10,17 @@ public final class Steps {
     }
 
     public static <T> Step<T, T> identity(String id, Class<T> type) {
-        return Step.of(id, type, type, (input, ctx) -> input);
+        return Step.builder(id, type, type).execute((input, ctx) -> input).build();
     }
 
     public static <T> Step<T, T> throwing(String id, Class<T> type, RuntimeException error) {
-        return Step.of(id, type, type, (input, ctx) -> {
+        return Step.builder(id, type, type).execute((input, ctx) -> {
             throw error;
-        });
+        }).build();
     }
 
     public static Step<Void, Void> noop(String id) {
-        return Step.of(id, Void.class, Void.class, (input, ctx) -> null);
+        return Step.builder(id, Void.class, Void.class).execute((input, ctx) -> null).build();
     }
 
     /**
@@ -29,14 +29,13 @@ public final class Steps {
      */
     @SuppressWarnings({"unchecked", "rawtypes"})
     public static Step<String, List<String>> split(String id, String delimiter) {
-        return (Step<String, List<String>>) (Step) Step.of(id, String.class, List.class,
-            (input, ctx) -> List.of(input.split(delimiter)));
+        return (Step<String, List<String>>) (Step) Step.builder(id, String.class, List.class).execute((input, ctx) -> List.of(input.split(delimiter))).build();
     }
 
     /**
      * A per-element step that uppercases a string — intended for use inside {@code foreach}.
      */
     public static Step<String, String> uppercase(String id) {
-        return Step.of(id, String.class, String.class, (input, ctx) -> input.toUpperCase());
+        return Step.builder(id, String.class, String.class).execute((input, ctx) -> input.toUpperCase()).build();
     }
 }

@@ -2,7 +2,6 @@ package io.flowpipe.api;
 
 import io.flowpipe.state.StateKey;
 
-import java.util.Objects;
 
 public interface Step<I, O> {
 
@@ -48,25 +47,5 @@ public interface Step<I, O> {
 
     static <I, O> StepBuilder<I, O> builder(String id, Class<I> inputType, Class<O> outputType) {
         return new StepBuilder<>(id, inputType, outputType);
-    }
-
-    static <I, O> Step<I, O> of(String id,
-                                Class<I> inputType,
-                                Class<O> outputType,
-                                StepBuilder.Body<I, O> body) {
-        Objects.requireNonNull(body, "body");
-        StepDescriptor<I, O> descriptor =
-            StepDescriptor.builder(id, inputType, outputType).build();
-        return new Step<>() {
-            @Override
-            public StepDescriptor<I, O> describe() {
-                return descriptor;
-            }
-
-            @Override
-            public O execute(I input, StepContext ctx) throws Exception {
-                return body.apply(input, ctx);
-            }
-        };
     }
 }

@@ -19,8 +19,6 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -39,20 +37,12 @@ class ForeachExecutionTest {
             .build();
     }
 
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    private static <R> Pipeline<List<String>, List<R>> listPipelineConcurrent(Step<String, R> step, int concurrency) {
-        return (Pipeline<List<String>, List<R>>) (Pipeline) PipelineBuilder
-            .start((Class<List<String>>) (Class<?>) List.class)
-            .foreach(step, concurrency)
-            .build();
-    }
-
     private static Step<String, String> upper(String id) {
-        return Step.of(id, String.class, String.class, (s, ctx) -> s.toUpperCase());
+        return Step.builder(id, String.class, String.class).execute((s, ctx) -> s.toUpperCase()).build();
     }
 
     private static Step<String, Integer> length(String id) {
-        return Step.of(id, String.class, Integer.class, (s, ctx) -> s.length());
+        return Step.builder(id, String.class, Integer.class).execute((s, ctx) -> s.length()).build();
     }
 
     /** Step with a configurable retry policy — body may throw. */
@@ -94,11 +84,11 @@ class ForeachExecutionTest {
     @Test
     void fail_fast_on_first_item_failure() {
         List<String> executed = new ArrayList<>();
-        Step<String, String> failSecond = Step.of("boom", String.class, String.class, (input, ctx) -> {
+        Step<String, String> failSecond = Step.builder("boom", String.class, String.class).execute((input, ctx) -> {
             executed.add(input);
             if (input.equals("b")) throw new RuntimeException("item-failure");
             return input;
-        });
+        }).build();
 
         Pipeline<List<String>, List<String>> p = listPipeline(failSecond);
         Result<List<String>> r = p.execute(List.of("a", "b", "c"));
@@ -140,60 +130,7 @@ class ForeachExecutionTest {
         assertThat(f.failedStepId()).isEqualTo("always-fail[0]");
     }
 
-    // ── 6.2 Concurrency > 1 ──────────────────────────────────────────────────
-
-    @Test
-    void concurrent_results_preserve_input_order() {
-        Pipeline<List<String>, List<Integer>> p = listPipelineConcurrent(length("len"), 4);
-        Result<List<Integer>> r = p.execute(List.of("a", "bb", "ccc", "dddd", "eeeee"));
-
-        assertThat(r).isInstanceOf(Success.class);
-        assertThat(((Success<List<Integer>>) r).value()).containsExactly(1, 2, 3, 4, 5);
-    }
-
-    @Test
-    void concurrent_fail_fast_stops_processing() {
-        CopyOnWriteArrayList<String> started = new CopyOnWriteArrayList<>();
-        Step<String, String> slowFail = Step.of("slow-fail", String.class, String.class, (input, ctx) -> {
-            started.add(input);
-            if (input.equals("fail")) throw new RuntimeException("boom");
-            try { Thread.sleep(50); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-            return input;
-        });
-
-        Pipeline<List<String>, List<String>> p =
-            listPipelineConcurrent(slowFail, 3);
-
-        Result<List<String>> r = p.execute(List.of("ok", "fail", "ok2"));
-
-        assertThat(r).isInstanceOf(Failure.class);
-        assertThat(((Failure<List<String>>) r).failedStepId()).isEqualTo("slow-fail[1]");
-    }
-
-    @Test
-    void concurrent_foreach_state_writes_do_not_corrupt_state() {
-        StateKey<String> KEY = StateKey.of("last", String.class);
-
-        // Each item writes its own value into shared State and immediately reads it back.
-        // With a plain HashMap this would cause ConcurrentModificationException or
-        // corrupt internal structure. ConcurrentHashMap makes it safe.
-        Step<String, String> stateWriter = Step.of("writer", String.class, String.class,
-            (s, ctx) -> {
-                ctx.state().set(KEY, s);
-                ctx.state().get(KEY); // must not throw
-                return s;
-            });
-
-        Pipeline<List<String>, List<String>> p = listPipelineConcurrent(stateWriter, 4);
-        List<String> items = List.of("a", "b", "c", "d", "e", "f", "g", "h");
-
-        for (int i = 0; i < 20; i++) {
-            Result<List<String>> r = p.execute(items);
-            assertThat(r).isInstanceOf(Success.class);
-        }
-    }
-
-    // ── 6.3 Build-time validation ─────────────────────────────────────────────
+    // ── 6.2 Build-time validation ─────────────────────────────────────────────
 
     @Test
     void foreach_on_non_list_output_throws_at_call_site() {
@@ -201,21 +138,6 @@ class ForeachExecutionTest {
             PipelineBuilder.start(String.class).foreach(upper("up"))
         ).isInstanceOf(PipelineBuildException.class)
             .hasMessageContaining("List");
-    }
-
-    @Test
-    void foreach_concurrency_zero_throws() {
-        assertThatThrownBy(() ->
-            listPipelineConcurrent(upper("up"), 0)
-        ).isInstanceOf(PipelineBuildException.class)
-            .hasMessageContaining("concurrency");
-    }
-
-    @Test
-    void foreach_concurrency_negative_throws() {
-        assertThatThrownBy(() ->
-            listPipelineConcurrent(upper("up"), -1)
-        ).isInstanceOf(PipelineBuildException.class);
     }
 
     @Test
@@ -239,13 +161,12 @@ class ForeachExecutionTest {
     @SuppressWarnings({"unchecked", "rawtypes"})
     void then_foreach_then_composes_correctly() {
         // Step that produces a list from a comma-delimited string
-        Step<String, List<String>> toList = (Step<String, List<String>>) (Step) Step.of(
-            "to-list", String.class, List.class, (s, ctx) -> List.of(s.split(",")));
+        Step<String, List<String>> toList = (Step<String, List<String>>) (Step) Step.builder(
+            "to-list", String.class, List.class).execute((s, ctx) -> List.of(s.split(","))).build();
 
         // Step that sums a List<Integer>
-        Step<List<Integer>, Integer> sum = (Step<List<Integer>, Integer>) (Step) Step.of(
-            "sum", List.class, Integer.class,
-            (list, ctx) -> ((List<Integer>) list).stream().mapToInt(Integer::intValue).sum());
+        Step<List<Integer>, Integer> sum = (Step<List<Integer>, Integer>) (Step) Step.builder(
+            "sum", List.class, Integer.class).execute((list, ctx) -> ((List<Integer>) list).stream().mapToInt(Integer::intValue).sum()).build();
 
         Pipeline<String, Integer> p = (Pipeline<String, Integer>) (Pipeline) PipelineBuilder
             .start(String.class)

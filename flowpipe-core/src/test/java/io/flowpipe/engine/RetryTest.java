@@ -392,7 +392,7 @@ class RetryTest {
     @Test
     void record_step_attempts_is_one_for_steps_succeeding_on_first_attempt() {
         TestMetricsRecorder rec = new TestMetricsRecorder();
-        Step<Integer, Integer> s = Step.of("s", Integer.class, Integer.class, (input, ctx) -> input);
+        Step<Integer, Integer> s = Step.builder("s", Integer.class, Integer.class).execute((input, ctx) -> input).build();
 
         PipelineBuilder.start(Integer.class).then(s).withMetrics(rec).build().execute(1);
 

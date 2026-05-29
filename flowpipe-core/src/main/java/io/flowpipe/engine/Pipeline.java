@@ -113,7 +113,7 @@ public final class Pipeline<I, O> {
         } else if (node instanceof BranchNode<?, ?> bn) {
             return new NodeDescriptor.Branch(bn.branchId(), bn.ifTrue().describe(), bn.ifFalse().describe());
         } else if (node instanceof ForeachNode<?, ?> fn) {
-            return new NodeDescriptor.Foreach(fn.step().describe(), fn.concurrency());
+            return new NodeDescriptor.Foreach(fn.step().describe());
         }
         throw new IllegalStateException("Unknown node type: " + node.getClass());
     }
@@ -508,79 +508,20 @@ public final class Pipeline<I, O> {
                                           ExecutionTrace.Builder traceBuilder, long deadlineNs) {
         List<?> items = (List<?>) input;
         String stepId = fn.step().describe().id();
-        int concurrency = fn.concurrency();
         List<Object> outputs = new ArrayList<>(items.size());
 
-        if (concurrency == 1) {
-            for (int i = 0; i < items.size(); i++) {
-                if (deadlineNs != Long.MAX_VALUE && System.nanoTime() > deadlineNs) {
-                    return new ForeachFailure(new Failure<>(
-                        new PipelineDeadlineExceededException(deadlineMs), "pipeline.deadline", traceBuilder.build()));
-                }
-                String itemLabel = stepId + "[" + i + "]";
-                ItemResult result = executeItemWithRetry(fn.step(), items.get(i), itemLabel, ctx, context, recorder, spanRecorder);
-                traceBuilder.append(result.trace());
-                if (result instanceof ItemFailure f) {
-                    return new ForeachFailure(new Failure<>(f.cause(), f.stepId(), traceBuilder.build()));
-                }
-                outputs.add(((ItemSuccess) result).value());
+        for (int i = 0; i < items.size(); i++) {
+            if (deadlineNs != Long.MAX_VALUE && System.nanoTime() > deadlineNs) {
+                return new ForeachFailure(new Failure<>(
+                    new PipelineDeadlineExceededException(deadlineMs), "pipeline.deadline", traceBuilder.build()));
             }
-        } else {
-            for (int windowStart = 0; windowStart < items.size(); windowStart += concurrency) {
-                if (deadlineNs != Long.MAX_VALUE && System.nanoTime() > deadlineNs) {
-                    return new ForeachFailure(new Failure<>(
-                        new PipelineDeadlineExceededException(deadlineMs), "pipeline.deadline", traceBuilder.build()));
-                }
-                int windowEnd = Math.min(windowStart + concurrency, items.size());
-                List<Future<ItemResult>> futures = new ArrayList<>(windowEnd - windowStart);
-
-                for (int i = windowStart; i < windowEnd; i++) {
-                    final int index = i;
-                    final String itemLabel = stepId + "[" + index + "]";
-                    try {
-                        futures.add(executor.submit(
-                            () -> executeItemWithRetry(fn.step(), items.get(index), itemLabel, ctx, context, recorder, spanRecorder)));
-                    } catch (RejectedExecutionException e) {
-                        cancelAll(futures);
-                        return new ForeachFailure(new Failure<>(e, stepId, traceBuilder.build()));
-                    }
-                }
-
-                for (Future<ItemResult> future : futures) {
-                    ItemResult result;
-                    try {
-                        if (deadlineNs == Long.MAX_VALUE) {
-                            result = future.get();
-                        } else {
-                            long remainingNs = deadlineNs - System.nanoTime();
-                            if (remainingNs <= 0) {
-                                cancelAll(futures);
-                                return new ForeachFailure(new Failure<>(
-                                    new PipelineDeadlineExceededException(deadlineMs), "pipeline.deadline", traceBuilder.build()));
-                            }
-                            result = future.get(remainingNs, TimeUnit.NANOSECONDS);
-                        }
-                    } catch (TimeoutException e) {
-                        cancelAll(futures);
-                        return new ForeachFailure(new Failure<>(
-                            new PipelineDeadlineExceededException(deadlineMs), "pipeline.deadline", traceBuilder.build()));
-                    } catch (ExecutionException e) {
-                        cancelAll(futures);
-                        return new ForeachFailure(new Failure<>(e.getCause(), stepId, traceBuilder.build()));
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        cancelAll(futures);
-                        return new ForeachFailure(new Failure<>(e, stepId, traceBuilder.build()));
-                    }
-
-                    traceBuilder.append(result.trace());
-                    if (result instanceof ItemFailure f) {
-                        cancelAll(futures);
-                        return new ForeachFailure(new Failure<>(f.cause(), f.stepId(), traceBuilder.build()));
-                    }
-                    outputs.add(((ItemSuccess) result).value());
-                }
+            String itemLabel = stepId + "[" + i + "]";
+            ItemResult result = executeItemWithRetry(fn.step(), items.get(i), itemLabel, ctx, context, recorder, spanRecorder);
+            traceBuilder.append(result.trace());
+            if (result instanceof ItemFailure f) {
+                return new ForeachFailure(new Failure<>(f.cause(), f.stepId(), traceBuilder.build()));
             }
+            outputs.add(((ItemSuccess) result).value());
         }
 
         return new ForeachSuccess(outputs);

@@ -44,8 +44,8 @@ class RecorderExceptionIsolationTest {
             @Override public void recordRetryAttempt(String stepId, int attemptNumber) {}
         };
 
-        Step<Integer, Integer> a = Step.of("a", Integer.class, Integer.class, (i, ctx) -> i + 1);
-        Step<Integer, Integer> b = Step.of("b", Integer.class, Integer.class, (i, ctx) -> i * 2);
+        Step<Integer, Integer> a = Step.builder("a", Integer.class, Integer.class).execute((i, ctx) -> i + 1).build();
+        Step<Integer, Integer> b = Step.builder("b", Integer.class, Integer.class).execute((i, ctx) -> i * 2).build();
 
         Pipeline<Integer, Integer> pipeline = PipelineBuilder.start(Integer.class)
             .then(a).then(b)
@@ -76,8 +76,7 @@ class RecorderExceptionIsolationTest {
         };
 
         IllegalStateException real = new IllegalStateException("real failure");
-        Step<Integer, Integer> bad = Step.of("bad", Integer.class, Integer.class,
-            (i, ctx) -> { throw real; });
+        Step<Integer, Integer> bad = Step.builder("bad", Integer.class, Integer.class).execute((i, ctx) -> { throw real; }).build();
 
         Pipeline<Integer, Integer> pipeline = PipelineBuilder.start(Integer.class)
             .then(bad)

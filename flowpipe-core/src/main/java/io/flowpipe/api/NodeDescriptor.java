@@ -29,12 +29,9 @@ public sealed interface NodeDescriptor {
         }
     }
 
-    record Foreach(StepDescriptor<?, ?> step, int concurrency) implements NodeDescriptor {
+    record Foreach(StepDescriptor<?, ?> step) implements NodeDescriptor {
         public Foreach {
             Objects.requireNonNull(step, "step");
-            if (concurrency < 1) {
-                throw new IllegalArgumentException("concurrency must be >= 1");
-            }
         }
     }
 }

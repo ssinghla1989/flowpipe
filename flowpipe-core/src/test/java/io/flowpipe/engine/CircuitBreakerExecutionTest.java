@@ -385,7 +385,7 @@ class CircuitBreakerExecutionTest {
                 throw new RuntimeException("always fails");
             }
         };
-        Step<Integer, Integer> stable = Step.of("stable", Integer.class, Integer.class, (n, ctx) -> n);
+        Step<Integer, Integer> stable = Step.builder("stable", Integer.class, Integer.class).execute((n, ctx) -> n).build();
 
         java.util.concurrent.ExecutorService exec = java.util.concurrent.Executors.newFixedThreadPool(2);
         try {
@@ -424,7 +424,7 @@ class CircuitBreakerExecutionTest {
                 return input * 2;
             }
         };
-        Step<Integer, Integer> stable = Step.of("stable2", Integer.class, Integer.class, (n, ctx) -> n + 1);
+        Step<Integer, Integer> stable = Step.builder("stable2", Integer.class, Integer.class).execute((n, ctx) -> n + 1).build();
 
         java.util.concurrent.ExecutorService exec = java.util.concurrent.Executors.newFixedThreadPool(2);
         try {

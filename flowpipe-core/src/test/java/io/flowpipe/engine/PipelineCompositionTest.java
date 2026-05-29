@@ -12,10 +12,8 @@ class PipelineCompositionTest {
 
     @Test
     void compatible_chain_compiles_and_builds() {
-        Step<String, Integer> parse = Step.of("parse", String.class, Integer.class,
-            (s, ctx) -> Integer.parseInt(s));
-        Step<Integer, String> render = Step.of("render", Integer.class, String.class,
-            (i, ctx) -> Integer.toString(i));
+        Step<String, Integer> parse = Step.builder("parse", String.class, Integer.class).execute((s, ctx) -> Integer.parseInt(s)).build();
+        Step<Integer, String> render = Step.builder("render", Integer.class, String.class).execute((i, ctx) -> Integer.toString(i)).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
             .then(parse)
@@ -35,10 +33,8 @@ class PipelineCompositionTest {
 
     @Test
     void build_rejects_duplicate_step_ids() {
-        Step<String, String> a = Step.of("normalize", String.class, String.class,
-            (s, ctx) -> s);
-        Step<String, String> b = Step.of("normalize", String.class, String.class,
-            (s, ctx) -> s);
+        Step<String, String> a = Step.builder("normalize", String.class, String.class).execute((s, ctx) -> s).build();
+        Step<String, String> b = Step.builder("normalize", String.class, String.class).execute((s, ctx) -> s).build();
 
         assertThatThrownBy(() -> PipelineBuilder.start(String.class)
             .then(a)
@@ -61,8 +57,7 @@ class PipelineCompositionTest {
             @Override public Object execute(Object input, StepContext ctx) { return input; }
         };
         Step<String, String> coerced = (Step<String, String>) rawStep;
-        Step<String, String> next = Step.of("next", String.class, String.class,
-            (s, ctx) -> s);
+        Step<String, String> next = Step.builder("next", String.class, String.class).execute((s, ctx) -> s).build();
 
         assertThatThrownBy(() -> PipelineBuilder.start(String.class)
             .then(coerced)
@@ -75,18 +70,18 @@ class PipelineCompositionTest {
 
     @Test
     void builder_rejects_then_after_build() {
-        Step<String, String> a = Step.of("a", String.class, String.class, (s, ctx) -> s);
+        Step<String, String> a = Step.builder("a", String.class, String.class).execute((s, ctx) -> s).build();
         PipelineBuilder<String, String> builder = PipelineBuilder.start(String.class).then(a);
         builder.build();
 
-        Step<String, String> b = Step.of("b", String.class, String.class, (s, ctx) -> s);
+        Step<String, String> b = Step.builder("b", String.class, String.class).execute((s, ctx) -> s).build();
         assertThatThrownBy(() -> builder.then(b))
             .isInstanceOf(IllegalStateException.class);
     }
 
     @Test
     void builder_rejects_double_build() {
-        Step<String, String> a = Step.of("a", String.class, String.class, (s, ctx) -> s);
+        Step<String, String> a = Step.builder("a", String.class, String.class).execute((s, ctx) -> s).build();
         PipelineBuilder<String, String> builder = PipelineBuilder.start(String.class).then(a);
         builder.build();
 

@@ -11,11 +11,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 class RecordingPipelineLifecycleTest {
 
     private static Step<String, String> pass(String id) {
-        return Step.of(id, String.class, String.class, (input, ctx) -> input);
+        return Step.builder(id, String.class, String.class).execute((input, ctx) -> input).build();
     }
 
     private static Step<String, String> throwing(String id, RuntimeException ex) {
-        return Step.of(id, String.class, String.class, (input, ctx) -> { throw ex; });
+        return Step.builder(id, String.class, String.class).execute((input, ctx) -> { throw ex; }).build();
     }
 
     @Test

@@ -21,12 +21,11 @@ class ExecutionStateTest {
         StateKey<String> KEY = StateKey.of("k", String.class);
 
         AtomicReference<String> firstObserved = new AtomicReference<>("initial");
-        Step<String, String> writer = Step.of("writer", String.class, String.class,
-            (s, ctx) -> {
+        Step<String, String> writer = Step.builder("writer", String.class, String.class).execute((s, ctx) -> {
                 firstObserved.set(ctx.state().get(KEY));
                 ctx.state().set(KEY, "written-" + s);
                 return s;
-            });
+            }).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class).then(writer).build();
 
@@ -126,11 +125,10 @@ class ExecutionStateTest {
     void two_executions_see_distinct_request_contexts() {
         ContextKey<String> TRACE_ID = ContextKey.of("traceId", String.class);
         AtomicReference<String> observed = new AtomicReference<>();
-        Step<String, String> reader = Step.of("reader", String.class, String.class,
-            (s, ctx) -> {
+        Step<String, String> reader = Step.builder("reader", String.class, String.class).execute((s, ctx) -> {
                 observed.set(ctx.context().get(TRACE_ID));
                 return s;
-            });
+            }).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class).then(reader).build();
 

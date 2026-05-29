@@ -27,11 +27,11 @@ class BranchingTest {
     // --- helpers ---
 
     private static Step<Integer, String> intToStr(String id) {
-        return Step.of(id, Integer.class, String.class, (i, ctx) -> "v" + i);
+        return Step.builder(id, Integer.class, String.class).execute((i, ctx) -> "v" + i).build();
     }
 
     private static Step<Integer, Integer> passInt(String id) {
-        return Step.of(id, Integer.class, Integer.class, (i, ctx) -> i);
+        return Step.builder(id, Integer.class, Integer.class).execute((i, ctx) -> i).build();
     }
 
     private static Pipeline<Integer, String> posArm() {
@@ -78,7 +78,7 @@ class BranchingTest {
     @SuppressWarnings({"unchecked", "rawtypes"})
     void branch_rejects_mismatched_ifTrue_input_type() {
         Pipeline<String, String> wrongInputArm = PipelineBuilder.start(String.class)
-            .then(Step.of("x", String.class, String.class, (s, ctx) -> s))
+            .then(Step.builder("x", String.class, String.class).execute((s, ctx) -> s).build())
             .build();
         Pipeline<Integer, String> coerced = (Pipeline) wrongInputArm;
         Pipeline<Integer, String> correctArm = posArm();
@@ -101,7 +101,7 @@ class BranchingTest {
     @SuppressWarnings({"unchecked", "rawtypes"})
     void branch_rejects_mismatched_ifFalse_input_type() {
         Pipeline<String, String> wrongInputArm = PipelineBuilder.start(String.class)
-            .then(Step.of("x", String.class, String.class, (s, ctx) -> s))
+            .then(Step.builder("x", String.class, String.class).execute((s, ctx) -> s).build())
             .build();
         Pipeline<Integer, String> coerced = (Pipeline) wrongInputArm;
         Pipeline<Integer, String> correctArm = posArm();
@@ -124,10 +124,10 @@ class BranchingTest {
     @SuppressWarnings({"unchecked", "rawtypes"})
     void branch_rejects_mismatched_arm_output_types() {
         Pipeline<Integer, String> strArm = PipelineBuilder.start(Integer.class)
-            .then(Step.of("s", Integer.class, String.class, (i, ctx) -> "" + i))
+            .then(Step.builder("s", Integer.class, String.class).execute((i, ctx) -> "" + i).build())
             .build();
         Pipeline<Integer, Long> longArm = PipelineBuilder.start(Integer.class)
-            .then(Step.of("l", Integer.class, Long.class, (i, ctx) -> (long) i))
+            .then(Step.builder("l", Integer.class, Long.class).execute((i, ctx) -> (long) i).build())
             .build();
 
         assertThatThrownBy(() ->
@@ -166,7 +166,7 @@ class BranchingTest {
     @Test
     void build_rejects_duplicate_branch_ids() {
         Pipeline<String, String> strArm = PipelineBuilder.start(String.class)
-            .then(Step.of("x", String.class, String.class, (s, ctx) -> s))
+            .then(Step.builder("x", String.class, String.class).execute((s, ctx) -> s).build())
             .build();
 
         Pipeline<Integer, String> firstBranch = PipelineBuilder.start(Integer.class)
@@ -177,8 +177,8 @@ class BranchingTest {
             PipelineBuilder.start(Integer.class)
                 .branch("route", (val, ctx) -> true, posArm(), negArm())
                 .branch("route", (val, ctx) -> false,
-                    PipelineBuilder.start(String.class).then(Step.of("a2", String.class, String.class, (s, ctx) -> s)).build(),
-                    PipelineBuilder.start(String.class).then(Step.of("b2", String.class, String.class, (s, ctx) -> s)).build())
+                    PipelineBuilder.start(String.class).then(Step.builder("a2", String.class, String.class).execute((s, ctx) -> s).build()).build(),
+                    PipelineBuilder.start(String.class).then(Step.builder("b2", String.class, String.class).execute((s, ctx) -> s).build()).build())
                 .build())
             .isInstanceOf(PipelineBuildException.class)
             .hasMessageContaining("route");
@@ -222,8 +222,7 @@ class BranchingTest {
     void predicate_can_read_shared_state() {
         StateKey<Boolean> FLAG = StateKey.of("flag", Boolean.class);
 
-        Step<Integer, Integer> setter = Step.of("setter", Integer.class, Integer.class,
-            (i, ctx) -> { ctx.state().set(FLAG, true); return i; });
+        Step<Integer, Integer> setter = Step.builder("setter", Integer.class, Integer.class).execute((i, ctx) -> { ctx.state().set(FLAG, true); return i; }).build();
 
         Pipeline<Integer, String> pipeline = PipelineBuilder.start(Integer.class)
             .then(setter)
@@ -400,8 +399,7 @@ class BranchingTest {
     void step_failure_inside_taken_arm_uses_step_id_not_branch_id() {
         RuntimeException boom = new RuntimeException("step boom");
         Pipeline<Integer, String> failingArm = PipelineBuilder.start(Integer.class)
-            .then(Step.of("explode", Integer.class, String.class,
-                (i, ctx) -> { throw boom; }))
+            .then(Step.builder("explode", Integer.class, String.class).execute((i, ctx) -> { throw boom; }).build())
             .build();
 
         Pipeline<Integer, String> pipeline = PipelineBuilder.start(Integer.class)
@@ -421,7 +419,7 @@ class BranchingTest {
 
     private static Pipeline<Integer, Integer> doubleArm() {
         return PipelineBuilder.start(Integer.class)
-            .then(Step.of("double", Integer.class, Integer.class, (i, ctx) -> i * 2))
+            .then(Step.builder("double", Integer.class, Integer.class).execute((i, ctx) -> i * 2).build())
             .build();
     }
 
@@ -475,8 +473,7 @@ class BranchingTest {
 
     @Test
     void single_arm_branch_can_be_chained_with_further_steps() {
-        Step<Integer, String> render = Step.of("render", Integer.class, String.class,
-            (i, ctx) -> "value=" + i);
+        Step<Integer, String> render = Step.builder("render", Integer.class, String.class).execute((i, ctx) -> "value=" + i).build();
 
         Pipeline<Integer, String> pipeline = PipelineBuilder.start(Integer.class)
             .branch("guard", (val, ctx) -> val > 100, doubleArm())
@@ -524,7 +521,7 @@ class BranchingTest {
     void skipped_arm_containing_nested_branch_emits_skipped_metric_for_nested_branch() {
         // outer branch predicate always selects ifTrue; ifFalse arm contains an inner branch.
         // The inner branch should appear as SKIPPED with a recorded metric.
-        Step<Integer, String> innerStep = Step.of("inner-step", Integer.class, String.class, (i, ctx) -> "v" + i);
+        Step<Integer, String> innerStep = Step.builder("inner-step", Integer.class, String.class).execute((i, ctx) -> "v" + i).build();
         Pipeline<Integer, String> innerArm = PipelineBuilder.start(Integer.class)
             .then(innerStep)
             .build();

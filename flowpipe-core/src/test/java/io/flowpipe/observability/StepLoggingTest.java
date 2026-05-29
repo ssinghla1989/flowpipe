@@ -33,8 +33,7 @@ class StepLoggingTest {
     @Test
     void step_start_log_carries_step_id_attempt_and_context_fields() {
         ContextKey<String> TRACE_ID = ContextKey.of("traceId", String.class);
-        Step<String, String> enrich = Step.of("enrich", String.class, String.class,
-            (s, ctx) -> s);
+        Step<String, String> enrich = Step.builder("enrich", String.class, String.class).execute((s, ctx) -> s).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class).then(enrich).build();
         pipeline.execute("x", RequestContext.builder().put(TRACE_ID, "abc-123").build());
@@ -50,8 +49,7 @@ class StepLoggingTest {
 
     @Test
     void step_finish_log_on_success_carries_duration_and_outcome() {
-        Step<String, String> compute = Step.of("compute", String.class, String.class,
-            (s, ctx) -> s);
+        Step<String, String> compute = Step.builder("compute", String.class, String.class).execute((s, ctx) -> s).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class).then(compute).build();
         pipeline.execute("hello");
@@ -68,8 +66,7 @@ class StepLoggingTest {
 
     @Test
     void step_error_log_on_failure_carries_error_class_message_and_no_finish_for_failing_step() {
-        Step<String, String> unstable = Step.of("unstable", String.class, String.class,
-            (s, ctx) -> { throw new IllegalStateException("nope"); });
+        Step<String, String> unstable = Step.builder("unstable", String.class, String.class).execute((s, ctx) -> { throw new IllegalStateException("nope"); }).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class).then(unstable).build();
         pipeline.execute("x");

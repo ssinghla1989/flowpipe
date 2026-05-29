@@ -18,11 +18,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 class LifecycleHooksTest {
 
     private static Step<String, String> pass(String id) {
-        return Step.of(id, String.class, String.class, (input, ctx) -> input);
+        return Step.builder(id, String.class, String.class).execute((input, ctx) -> input).build();
     }
 
     private static Step<String, String> throwing(String id, RuntimeException ex) {
-        return Step.of(id, String.class, String.class, (input, ctx) -> { throw ex; });
+        return Step.builder(id, String.class, String.class).execute((input, ctx) -> { throw ex; }).build();
     }
 
     // -------------------------------------------------------------------------
@@ -41,10 +41,10 @@ class LifecycleHooksTest {
             }
         };
 
-        Step<String, String> step = Step.of("check", String.class, String.class, (input, ctx) -> {
+        Step<String, String> step = Step.builder("check", String.class, String.class).execute((input, ctx) -> {
             flagAtExecution.add(Boolean.TRUE.equals(ctx.state().get(flag)));
             return input;
-        });
+        }).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
             .then(step)
@@ -186,10 +186,10 @@ class LifecycleHooksTest {
             }
         };
 
-        Step<String, String> step = Step.of("never", String.class, String.class, (input, ctx) -> {
+        Step<String, String> step = Step.builder("never", String.class, String.class).execute((input, ctx) -> {
             stepCalls.add("executed");
             return input;
-        });
+        }).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
             .then(step)

@@ -17,11 +17,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class PipelineDescribeTest {
 
     private static Step<String, Integer> parse(String id) {
-        return Step.of(id, String.class, Integer.class, (s, ctx) -> Integer.parseInt(s));
+        return Step.builder(id, String.class, Integer.class).execute((s, ctx) -> Integer.parseInt(s)).build();
     }
 
     private static Step<String, String> upper(String id) {
-        return Step.of(id, String.class, String.class, (s, ctx) -> s.toUpperCase());
+        return Step.builder(id, String.class, String.class).execute((s, ctx) -> s.toUpperCase()).build();
     }
 
     @Test
@@ -38,8 +38,7 @@ class PipelineDescribeTest {
 
     @Test
     void describe_lists_sequential_steps_in_order() {
-        Step<Integer, String> render = Step.of("render", Integer.class, String.class,
-            (i, ctx) -> Integer.toString(i));
+        Step<Integer, String> render = Step.builder("render", Integer.class, String.class).execute((i, ctx) -> Integer.toString(i)).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
             .then(parse("parse"))
@@ -75,8 +74,8 @@ class PipelineDescribeTest {
 
     @Test
     void describe_parallel_lists_branch_steps() {
-        Step<String, Integer> lenA = Step.of("len-a", String.class, Integer.class, (s, ctx) -> s.length());
-        Step<String, Integer> lenB = Step.of("len-b", String.class, Integer.class, (s, ctx) -> s.length() * 2);
+        Step<String, Integer> lenA = Step.builder("len-a", String.class, Integer.class).execute((s, ctx) -> s.length()).build();
+        Step<String, Integer> lenB = Step.builder("len-b", String.class, Integer.class).execute((s, ctx) -> s.length() * 2).build();
 
         Pipeline<String, Integer> pipeline = PipelineBuilder.start(String.class)
             .parallel2(Integer.class, Integer::sum, lenA, lenB)
@@ -92,8 +91,8 @@ class PipelineDescribeTest {
 
     @Test
     void describe_parallelN_exposes_declared_keys() {
-        Step<String, Integer> a = Step.of("a", String.class, Integer.class, (s, ctx) -> 1);
-        Step<String, Integer> b = Step.of("b", String.class, Integer.class, (s, ctx) -> 2);
+        Step<String, Integer> a = Step.builder("a", String.class, Integer.class).execute((s, ctx) -> 1).build();
+        Step<String, Integer> b = Step.builder("b", String.class, Integer.class).execute((s, ctx) -> 2).build();
 
         Pipeline<String, Integer> pipeline = PipelineBuilder.start(String.class)
             .parallelN(Integer.class, Map.of("a", a, "b", b),
@@ -108,7 +107,7 @@ class PipelineDescribeTest {
     @Test
     void describe_branch_recurses_into_arms() {
         Step<String, String> truthy = upper("truthy");
-        Step<String, String> falsy = Step.of("falsy", String.class, String.class, (s, ctx) -> s.toLowerCase());
+        Step<String, String> falsy = Step.builder("falsy", String.class, String.class).execute((s, ctx) -> s.toLowerCase()).build();
 
         Pipeline<String, String> ifTrue = PipelineBuilder.start(String.class).then(truthy).build();
         Pipeline<String, String> ifFalse = PipelineBuilder.start(String.class).then(falsy).build();
@@ -128,16 +127,15 @@ class PipelineDescribeTest {
 
     @Test
     @SuppressWarnings({"unchecked", "rawtypes"})
-    void describe_foreach_exposes_inner_step_and_concurrency() {
+    void describe_foreach_exposes_inner_step() {
         Pipeline<List<String>, List<String>> pipeline = (Pipeline<List<String>, List<String>>) (Pipeline)
             PipelineBuilder.start((Class<List<String>>) (Class<?>) List.class)
-                .foreach(upper("up"), 4)
+                .foreach(upper("up"))
                 .build();
 
         NodeDescriptor.Foreach foreach = (NodeDescriptor.Foreach) pipeline.describe().nodes().get(0);
 
         assertThat(foreach.step().id()).isEqualTo("up");
-        assertThat(foreach.concurrency()).isEqualTo(4);
     }
 
     @Test

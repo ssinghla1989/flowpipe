@@ -26,13 +26,13 @@ import io.flowpipe.api.Step;
 import io.flowpipe.api.Success;
 import io.flowpipe.engine.Pipeline;
 
-Step<String, Integer> parse = Step.of(
-    "parse", String.class, Integer.class,
-    (input, ctx) -> Integer.parseInt(input));
+Step<String, Integer> parse = Step.builder("parse", String.class, Integer.class)
+    .execute((input, ctx) -> Integer.parseInt(input))
+    .build();
 
-Step<Integer, String> describe = Step.of(
-    "describe", Integer.class, String.class,
-    (input, ctx) -> input >= 0 ? "non-negative" : "negative");
+Step<Integer, String> describe = Step.builder("describe", Integer.class, String.class)
+    .execute((input, ctx) -> input >= 0 ? "non-negative" : "negative")
+    .build();
 
 Pipeline<String, String> pipeline = Pipeline.builder(String.class)
     .then(parse)
@@ -54,23 +54,21 @@ if (result instanceof Success<String> s) {
 
 ## Defining steps
 
-### Inline steps with `Step.of()`
+### Inline steps with `Step.builder()`
 
-For simple, one-off steps, use the factory:
+Use the fluent builder to define a step — all configuration lives in one expression:
 
 ```java
-Step<String, Integer> parse = Step.of(
-    "parse",           // unique id within the pipeline
-    String.class,      // input type
-    Integer.class,     // output type
-    (input, ctx) -> Integer.parseInt(input));
+Step<String, Integer> parse = Step.builder("parse", String.class, Integer.class)
+    .execute((input, ctx) -> Integer.parseInt(input))
+    .build();
 ```
 
 The id is used in logs, metrics, trace entries, and failure reporting. It must be unique within the pipeline — `build()` will reject duplicates.
 
-### Steps with policies using `Step.builder()`
+### Steps with policies
 
-When you need retry, timeout, circuit breaker, or validation policies, use the fluent builder — all configuration lives in one expression:
+When you need retry, timeout, circuit breaker, or validation policies, chain them on the same builder:
 
 ```java
 Step<String, UserProfile> fetchProfile = Step.builder("fetch-profile", String.class, UserProfile.class)
@@ -131,11 +129,12 @@ Step<String, UserProfile> fetchProfile = Step.builder("fetch-profile", String.cl
     .build();
 
 // Any downstream step reads from state directly
-Step<Order, OrderResult> charge = Step.of("charge", Order.class, OrderResult.class,
-    (order, ctx) -> {
+Step<Order, OrderResult> charge = Step.builder("charge", Order.class, OrderResult.class)
+    .execute((order, ctx) -> {
         UserProfile profile = ctx.state().get(PROFILE_KEY);  // just works
         return paymentService.charge(order, profile);
-    });
+    })
+    .build();
 ```
 
 The key is preserved across `withRetry(...)`, `withTimeout(...)`, and `withCircuitBreaker(...)` calls. Output is only written on success — a failing step never mutates state. Works for sequential steps, parallel branch steps, and foreach element steps.
@@ -144,28 +143,30 @@ The key is preserved across `withRetry(...)`, `withTimeout(...)`, and `withCircu
 
 The `StepContext` passed to every `execute()` call provides two data channels:
 
-**`State`** — mutable, execution-scoped, shared across all steps in a single `pipeline.execute(...)` call. Backed by `ConcurrentHashMap`, safe for concurrent reads/writes during parallel or concurrent-foreach execution. Compound read-modify-write operations are the caller's responsibility.
+**`State`** — mutable, execution-scoped, shared across all steps in a single `pipeline.execute(...)` call. Backed by `ConcurrentHashMap`, safe for concurrent reads/writes during parallel branch execution. Compound read-modify-write operations are the caller's responsibility.
 
 ```java
 // Define typed keys — equality is based on both name and type
 StateKey<List<String>> errorsKey = StateKey.of("validation-errors", List.class);
 
 // A step that writes to state
-Step<Order, Order> validate = Step.of("validate", Order.class, Order.class,
-    (order, ctx) -> {
+Step<Order, Order> validate = Step.builder("validate", Order.class, Order.class)
+    .execute((order, ctx) -> {
         List<String> errors = new ArrayList<>();
         if (order.amount() <= 0) errors.add("amount must be positive");
         ctx.state().set(errorsKey, errors);
         return order;
-    });
+    })
+    .build();
 
 // A later step that reads from state
-Step<Order, OrderResult> charge = Step.of("charge", Order.class, OrderResult.class,
-    (order, ctx) -> {
+Step<Order, OrderResult> charge = Step.builder("charge", Order.class, OrderResult.class)
+    .execute((order, ctx) -> {
         List<String> errors = ctx.state().get(errorsKey);
         if (errors != null && !errors.isEmpty()) throw new ValidationException(errors.toString());
         return paymentService.charge(order);
-    });
+    })
+    .build();
 ```
 
 **`RequestContext`** — immutable, request-scoped, set before the pipeline executes. Used for tenant IDs, trace IDs, feature flags, or any per-request metadata. Steps only read it; they cannot write to it.
@@ -184,12 +185,13 @@ RequestContext ctx = RequestContext.builder()
 Result<String> result = pipeline.execute(input, ctx);
 
 // Inside a step
-Step<Order, Order> auditStep = Step.of("audit", Order.class, Order.class,
-    (order, stepCtx) -> {
+Step<Order, Order> auditStep = Step.builder("audit", Order.class, Order.class)
+    .execute((order, stepCtx) -> {
         String tenant = stepCtx.context().get(tenantKey); // "acme-corp"
         auditLog.record(tenant, order);
         return order;
-    });
+    })
+    .build();
 ```
 
 Every `RequestContext` entry is automatically included as a structured key-value field in every SLF4J log event emitted by the framework.
@@ -256,14 +258,17 @@ Fan out to multiple independent steps simultaneously and merge their typed outpu
 ### `parallel2` / `parallel3` / `parallel4`
 
 ```java
-Step<String, Integer> wordCount = Step.of("wordCount", String.class, Integer.class,
-    (text, ctx) -> text.split("\\s+").length);
+Step<String, Integer> wordCount = Step.builder("wordCount", String.class, Integer.class)
+    .execute((text, ctx) -> text.split("\\s+").length)
+    .build();
 
-Step<String, Integer> charCount = Step.of("charCount", String.class, Integer.class,
-    (text, ctx) -> text.length());
+Step<String, Integer> charCount = Step.builder("charCount", String.class, Integer.class)
+    .execute((text, ctx) -> text.length())
+    .build();
 
-Step<String, Long> lineCount = Step.of("lineCount", String.class, Long.class,
-    (text, ctx) -> text.lines().count());
+Step<String, Long> lineCount = Step.builder("lineCount", String.class, Long.class)
+    .execute((text, ctx) -> text.lines().count())
+    .build();
 
 // parallel2 — two branches, typed combiner
 Pipeline<String, String> two = PipelineBuilder.start(String.class)
@@ -337,11 +342,13 @@ Step<String, List<TextResult>> textSearch = new Step<>() {
 
 Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
     .parallel2(textSearch, imageSearch)   // no Class<R> or combiner — input passes through
-    .then(Step.of("assemble", String.class, String.class, (query, ctx) -> {
-        List<TextResult>  text   = ctx.state().get(TEXT_KEY);   // results in state
-        List<ImageResult> images = ctx.state().get(IMAGE_KEY);
-        return renderResults(query, text, images);
-    }))
+    .then(Step.builder("assemble", String.class, String.class)
+        .execute((query, ctx) -> {
+            List<TextResult>  text   = ctx.state().get(TEXT_KEY);   // results in state
+            List<ImageResult> images = ctx.state().get(IMAGE_KEY);
+            return renderResults(query, text, images);
+        })
+        .build())
     .build();
 ```
 
@@ -422,20 +429,17 @@ Because the false arm is an implicit identity pass-through, the `ifTrue` pipelin
 Apply a step to every element of a `List` input and collect the results into a `List`.
 
 ```java
-Step<String, UserProfile> enrich = Step.of(
-    "enrich-user", String.class, UserProfile.class,
-    (userId, ctx) -> profileService.fetch(userId));
+Step<String, UserProfile> enrich = Step.builder("enrich-user", String.class, UserProfile.class)
+    .execute((userId, ctx) -> profileService.fetch(userId))
+    .build();
 
 Pipeline<List<String>, List<UserProfile>> pipeline = PipelineBuilder
     .start((Class<List<String>>) (Class<?>) List.class)
-    .foreach(enrich)       // sequential, concurrency = 1
-    // .foreach(enrich, 8) // up to 8 concurrent element executions
+    .foreach(enrich)
     .build();
 ```
 
-Sequential foreach preserves element order. Concurrent foreach (`concurrency > 1`) processes elements in windows of that size using the pipeline's executor; output order matches input order regardless of completion order within a window.
-
-For multi-step processing per element, wrap the logic in a single `Step` implementation that calls each sub-step directly.
+Foreach applies the step to every element sequentially and preserves input order. For multi-step processing per element, wrap the logic in a single `Step` implementation that calls each sub-step directly.
 
 ---
 
@@ -446,8 +450,8 @@ Attach a `RetryPolicy` to any `StepDescriptor`. The framework retries transparen
 ```java
 StepDescriptor<Order, PaymentResult> desc = StepDescriptor
     .builder("charge-card", Order.class, PaymentResult.class)
-    .withRetry(RetryPolicy.exponential(3, 100, 2.0, true))
-    //                     attempts  initial(ms) multiplier jitter
+    .withRetry(RetryPolicy.exponential(3, 100, 30_000, 2.0, true))
+    //                     attempts  initial(ms) maxDelay(ms) multiplier jitter
     .build();
 ```
 
@@ -455,7 +459,7 @@ StepDescriptor<Order, PaymentResult> desc = StepDescriptor
 |---|---|
 | `RetryPolicy.none()` | One attempt, no retry (default) |
 | `RetryPolicy.fixed(attempts, delayMs)` | Constant delay between attempts |
-| `RetryPolicy.exponential(attempts, initialMs, multiplier, jitter)` | Delay grows by `multiplier` each attempt; `jitter=true` adds randomness to avoid thundering herd |
+| `RetryPolicy.exponential(attempts, initialMs, maxDelayMs, multiplier, jitter)` | Delay grows by `multiplier` each attempt up to `maxDelayMs`; `jitter=true` adds randomness to avoid thundering herd |
 
 ### Selective retry with `.retryOn(Predicate<Throwable>)`
 
@@ -521,7 +525,7 @@ Pipeline<Order, OrderResult> pipeline = PipelineBuilder.start(Order.class)
 
 If the budget is exceeded, execution stops immediately and the pipeline returns a `Failure` whose `cause()` is `PipelineDeadlineExceededException` (which carries `deadlineMs()`) and whose `failedStepId()` is `"pipeline.deadline"`.
 
-The deadline is enforced everywhere futures are awaited: parallel branch futures and concurrent `foreach` item futures. A slow parallel branch or a slow concurrent foreach window cannot hold the pipeline past the deadline.
+The deadline is enforced everywhere futures are awaited: parallel branch futures. A slow parallel branch cannot hold the pipeline past the deadline.
 
 The per-step `TimeoutPolicy` and the pipeline deadline are orthogonal: a step can have both. The tighter bound wins — whichever fires first terminates that step. The pipeline deadline propagates automatically into branch arm sub-pipelines.
 
@@ -757,7 +761,7 @@ for (NodeDescriptor node : desc.nodes()) {
         System.out.println("  ifFalse: " + b.ifFalse().nodes().size() + " nodes");
     }
     if (node instanceof NodeDescriptor.Foreach f) {
-        System.out.println("foreach: " + f.step().id() + " concurrency=" + f.concurrency());
+        System.out.println("foreach: " + f.step().id());
     }
 }
 ```

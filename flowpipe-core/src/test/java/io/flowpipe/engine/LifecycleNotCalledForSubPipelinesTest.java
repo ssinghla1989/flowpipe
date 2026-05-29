@@ -13,7 +13,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class LifecycleNotCalledForSubPipelinesTest {
 
     private static Step<Integer, String> intToStr(String id) {
-        return Step.of(id, Integer.class, String.class, (i, ctx) -> "v" + i);
+        return Step.builder(id, Integer.class, String.class).execute((i, ctx) -> "v" + i).build();
     }
 
     @Test

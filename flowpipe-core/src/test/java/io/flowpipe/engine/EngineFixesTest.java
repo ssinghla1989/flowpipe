@@ -30,8 +30,7 @@ class EngineFixesTest {
 
     @Test
     void step_returning_null_surfaces_as_failure_with_clear_message() {
-        Step<String, String> nullStep = Step.of("null-returner", String.class, String.class,
-            (input, ctx) -> null);
+        Step<String, String> nullStep = Step.builder("null-returner", String.class, String.class).execute((input, ctx) -> null).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
             .then(nullStep)
@@ -102,7 +101,7 @@ class EngineFixesTest {
             }
         };
 
-        Step<String, String> step = Step.of("step", String.class, String.class, (s, ctx) -> s);
+        Step<String, String> step = Step.builder("step", String.class, String.class).execute((s, ctx) -> s).build();
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
             .then(step)
             .withLifecycle(lifecycle)
@@ -122,7 +121,7 @@ class EngineFixesTest {
 
     @Test
     void branch_predicate_exception_surfaces_as_failure_with_branch_id() {
-        Step<String, String> step = Step.of("step", String.class, String.class, (s, ctx) -> s);
+        Step<String, String> step = Step.builder("step", String.class, String.class).execute((s, ctx) -> s).build();
         Pipeline<String, String> ifTrue = PipelineBuilder.start(String.class).then(step).build();
         Pipeline<String, String> ifFalse = PipelineBuilder.start(String.class).then(step).build();
 
@@ -159,8 +158,8 @@ class EngineFixesTest {
             }
         };
 
-        Step<String, String> a = Step.of("a", String.class, String.class, (s, ctx) -> s + "A");
-        Step<String, String> b = Step.of("b", String.class, String.class, (s, ctx) -> s + "B");
+        Step<String, String> a = Step.builder("a", String.class, String.class).execute((s, ctx) -> s + "A").build();
+        Step<String, String> b = Step.builder("b", String.class, String.class).execute((s, ctx) -> s + "B").build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
             .then(a)
@@ -194,8 +193,7 @@ class EngineFixesTest {
         };
 
         RuntimeException boom = new RuntimeException("boom");
-        Step<String, String> failingStep = Step.of("fail", String.class, String.class,
-            (input, ctx) -> { throw boom; });
+        Step<String, String> failingStep = Step.builder("fail", String.class, String.class).execute((input, ctx) -> { throw boom; }).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
             .then(failingStep)
@@ -223,10 +221,8 @@ class EngineFixesTest {
             }
         };
 
-        Step<Integer, Integer> incrementStep = Step.of("increment", Integer.class, Integer.class,
-            (n, ctx) -> n + 1);
-        Step<Integer, Integer> decrementStep = Step.of("decrement", Integer.class, Integer.class,
-            (n, ctx) -> n - 1);
+        Step<Integer, Integer> incrementStep = Step.builder("increment", Integer.class, Integer.class).execute((n, ctx) -> n + 1).build();
+        Step<Integer, Integer> decrementStep = Step.builder("decrement", Integer.class, Integer.class).execute((n, ctx) -> n - 1).build();
 
         Pipeline<Integer, Integer> ifTrue = PipelineBuilder.start(Integer.class)
             .then(incrementStep).build();
@@ -260,8 +256,8 @@ class EngineFixesTest {
         };
 
         // Arm pipelines built WITHOUT .withTracing() — the outer recorder must still propagate.
-        Step<String, String> trueStep  = Step.of("arm.true",  String.class, String.class, (s, ctx) -> s + "-T");
-        Step<String, String> falseStep = Step.of("arm.false", String.class, String.class, (s, ctx) -> s + "-F");
+        Step<String, String> trueStep  = Step.builder("arm.true", String.class, String.class).execute((s, ctx) -> s + "-T").build();
+        Step<String, String> falseStep = Step.builder("arm.false", String.class, String.class).execute((s, ctx) -> s + "-F").build();
         Pipeline<String, String> ifTrue  = PipelineBuilder.start(String.class).then(trueStep).build();
         Pipeline<String, String> ifFalse = PipelineBuilder.start(String.class).then(falseStep).build();
 
@@ -294,7 +290,7 @@ class EngineFixesTest {
             }
         };
 
-        Step<String, String> step = Step.of("step", String.class, String.class, (s, ctx) -> s);
+        Step<String, String> step = Step.builder("step", String.class, String.class).execute((s, ctx) -> s).build();
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
             .then(step)
             .withTracing(badRecorder)

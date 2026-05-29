@@ -53,8 +53,7 @@ class StepExecutionTest {
             @Override public String execute(String input, StepContext ctx) { return input; }
         };
         AtomicBoolean secondRan = new AtomicBoolean(false);
-        Step<String, String> second = Step.of("second", String.class, String.class,
-            (s, ctx) -> { secondRan.set(true); return s; });
+        Step<String, String> second = Step.builder("second", String.class, String.class).execute((s, ctx) -> { secondRan.set(true); return s; }).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
             .then(first).then(second).build();
@@ -68,8 +67,7 @@ class StepExecutionTest {
 
     @Test
     void noop_validator_accepts_any_non_null_value_including_empty_string() {
-        Step<String, String> passThrough = Step.of("pass", String.class, String.class,
-            (s, ctx) -> s.isEmpty() ? "empty" : s);
+        Step<String, String> passThrough = Step.builder("pass", String.class, String.class).execute((s, ctx) -> s.isEmpty() ? "empty" : s).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class).then(passThrough).build();
 
@@ -80,8 +78,7 @@ class StepExecutionTest {
     @Test
     void step_execute_exceptions_surface_as_failure_with_cause_and_id() {
         RuntimeException boom = new RuntimeException("boom");
-        Step<String, String> bad = Step.of("bad", String.class, String.class,
-            (s, ctx) -> { throw boom; });
+        Step<String, String> bad = Step.builder("bad", String.class, String.class).execute((s, ctx) -> { throw boom; }).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class).then(bad).build();
         Result<String> result = pipeline.execute("x");
@@ -95,10 +92,10 @@ class StepExecutionTest {
     @Test
     void execute_with_null_input_throws_before_any_step_runs() {
         AtomicBoolean stepRan = new AtomicBoolean(false);
-        Step<String, String> step = Step.of("s", String.class, String.class, (s, ctx) -> {
+        Step<String, String> step = Step.builder("s", String.class, String.class).execute((s, ctx) -> {
             stepRan.set(true);
             return s;
-        });
+        }).build();
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class).then(step).build();
 
         assertThatThrownBy(() -> pipeline.execute(null))
@@ -111,12 +108,11 @@ class StepExecutionTest {
     void step_context_state_and_context_are_non_null_with_empty_context() {
         AtomicBoolean stateNotNull = new AtomicBoolean(false);
         AtomicBoolean contextNotNull = new AtomicBoolean(false);
-        Step<String, String> inspector = Step.of("inspector", String.class, String.class,
-            (s, ctx) -> {
+        Step<String, String> inspector = Step.builder("inspector", String.class, String.class).execute((s, ctx) -> {
                 stateNotNull.set(ctx.state() != null);
                 contextNotNull.set(ctx.context() != null);
                 return s;
-            });
+            }).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class).then(inspector).build();
         pipeline.execute("x");

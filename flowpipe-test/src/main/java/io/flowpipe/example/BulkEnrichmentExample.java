@@ -36,15 +36,14 @@ public final class BulkEnrichmentExample {
      * <p>Structure:
      * <pre>
      *   extract-ids          (BatchRequest → List&lt;String&gt;)
-     *     → foreach(fetch-order, concurrency=4)   (String → Order, applied per element)
+     *     → foreach(fetch-order)   (String → Order, applied per element)
      * </pre>
      */
     @SuppressWarnings({"unchecked", "rawtypes"})
     public static Pipeline<BatchRequest, List<Order>> build(OrderLookupService lookupService) {
         Step<BatchRequest, List<String>> extractIds =
-            (Step<BatchRequest, List<String>>) (Step) Step.of(
-                "extract-ids", BatchRequest.class, List.class,
-                (req, ctx) -> req.orderIds());
+            (Step<BatchRequest, List<String>>) (Step) Step.builder(
+                "extract-ids", BatchRequest.class, List.class).execute((req, ctx) -> req.orderIds()).build();
 
         StepDescriptor<String, Order> fetchDesc = StepDescriptor.builder("fetch-order", String.class, Order.class).build();
         Step<String, Order> fetchOrder = new Step<>() {
@@ -57,7 +56,7 @@ public final class BulkEnrichmentExample {
         return (Pipeline<BatchRequest, List<Order>>) (Pipeline) PipelineBuilder
             .start(BatchRequest.class)
             .then(extractIds)
-            .foreach(fetchOrder, 4)
+            .foreach(fetchOrder)
             .build();
     }
 

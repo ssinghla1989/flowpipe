@@ -16,8 +16,7 @@ class PipelineBuilderAliasTest {
 
     @Test
     void pipeline_builder_alias_produces_equivalent_pipeline() {
-        Step<String, String> step = Step.of("up", String.class, String.class,
-            (in, ctx) -> in.toUpperCase());
+        Step<String, String> step = Step.builder("up", String.class, String.class).execute((in, ctx) -> in.toUpperCase()).build();
 
         Pipeline<String, String> viaAlias = Pipeline.builder(String.class)
             .then(step)
@@ -50,7 +49,7 @@ class PipelineBuilderAliasTest {
 
     @Test
     void pipeline_builder_start_still_works() {
-        Step<Integer, Integer> step = Step.of("id", Integer.class, Integer.class, (i, ctx) -> i);
+        Step<Integer, Integer> step = Step.builder("id", Integer.class, Integer.class).execute((i, ctx) -> i).build();
         Pipeline<Integer, Integer> p = PipelineBuilder.start(Integer.class).then(step).build();
         Result<Integer> result = p.execute(42);
         assertThat(result).isInstanceOf(Success.class);

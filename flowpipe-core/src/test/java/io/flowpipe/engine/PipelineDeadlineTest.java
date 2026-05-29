@@ -18,7 +18,7 @@ class PipelineDeadlineTest {
 
     @Test
     void pipeline_within_deadline_succeeds() {
-        Step<String, String> fast = Step.of("fast", String.class, String.class, (s, ctx) -> s);
+        Step<String, String> fast = Step.builder("fast", String.class, String.class).execute((s, ctx) -> s).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
             .then(fast)
@@ -35,14 +35,14 @@ class PipelineDeadlineTest {
     void deadline_exceeded_between_steps_produces_failure() {
         AtomicBoolean secondStepRan = new AtomicBoolean(false);
 
-        Step<String, String> slow = Step.of("slow", String.class, String.class, (s, ctx) -> {
+        Step<String, String> slow = Step.builder("slow", String.class, String.class).execute((s, ctx) -> {
             sleepUninterruptibly(150);
             return s;
-        });
-        Step<String, String> after = Step.of("after", String.class, String.class, (s, ctx) -> {
+        }).build();
+        Step<String, String> after = Step.builder("after", String.class, String.class).execute((s, ctx) -> {
             secondStepRan.set(true);
             return s;
-        });
+        }).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
             .then(slow)
@@ -61,11 +61,11 @@ class PipelineDeadlineTest {
 
     @Test
     void deadline_exception_carries_configured_deadline_ms() {
-        Step<String, String> slow = Step.of("slow", String.class, String.class, (s, ctx) -> {
+        Step<String, String> slow = Step.builder("slow", String.class, String.class).execute((s, ctx) -> {
             sleepUninterruptibly(200);
             return s;
-        });
-        Step<String, String> next = Step.of("next", String.class, String.class, (s, ctx) -> s);
+        }).build();
+        Step<String, String> next = Step.builder("next", String.class, String.class).execute((s, ctx) -> s).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
             .then(slow)
@@ -85,15 +85,14 @@ class PipelineDeadlineTest {
     void deadline_is_checked_between_foreach_items() {
         AtomicBoolean thirdItemRan = new AtomicBoolean(false);
 
-        Step<String, String> slowItem = Step.of("item", String.class, String.class, (s, ctx) -> {
+        Step<String, String> slowItem = Step.builder("item", String.class, String.class).execute((s, ctx) -> {
             if ("item-2".equals(s)) thirdItemRan.set(true);
             if ("item-0".equals(s)) sleepUninterruptibly(150);
             return s;
-        });
+        }).build();
 
         @SuppressWarnings({"unchecked", "rawtypes"})
-        Step<String, List<String>> toList = (Step) Step.of("to-list", String.class, List.class,
-            (s, ctx) -> List.of("item-0", "item-1", "item-2"));
+        Step<String, List<String>> toList = (Step) Step.builder("to-list", String.class, List.class).execute((s, ctx) -> List.of("item-0", "item-1", "item-2")).build();
 
         @SuppressWarnings({"unchecked", "rawtypes"})
         Pipeline<String, ?> pipeline = (Pipeline<String, ?>) (Pipeline) PipelineBuilder.start(String.class)
@@ -113,14 +112,14 @@ class PipelineDeadlineTest {
     void deadline_propagates_into_branch_arms() {
         AtomicBoolean armStepRan = new AtomicBoolean(false);
 
-        Step<String, String> slow = Step.of("slow", String.class, String.class, (s, ctx) -> {
+        Step<String, String> slow = Step.builder("slow", String.class, String.class).execute((s, ctx) -> {
             sleepUninterruptibly(150);
             return s;
-        });
-        Step<String, String> armStep = Step.of("arm-step", String.class, String.class, (s, ctx) -> {
+        }).build();
+        Step<String, String> armStep = Step.builder("arm-step", String.class, String.class).execute((s, ctx) -> {
             armStepRan.set(true);
             return s;
-        });
+        }).build();
 
         Pipeline<String, String> armPipeline = PipelineBuilder.start(String.class)
             .then(armStep)
@@ -143,11 +142,11 @@ class PipelineDeadlineTest {
     void deadline_enforced_while_waiting_for_parallel_branch() {
         // One branch sleeps past the deadline; the pipeline must surface a deadline failure
         // rather than blocking until the slow branch finishes.
-        Step<String, String> slow = Step.of("slow-par", String.class, String.class, (s, ctx) -> {
+        Step<String, String> slow = Step.builder("slow-par", String.class, String.class).execute((s, ctx) -> {
             sleepUninterruptibly(500);
             return s;
-        });
-        Step<String, String> fast = Step.of("fast-par", String.class, String.class, (s, ctx) -> s);
+        }).build();
+        Step<String, String> fast = Step.builder("fast-par", String.class, String.class).execute((s, ctx) -> s).build();
 
         java.util.concurrent.ExecutorService exec = java.util.concurrent.Executors.newFixedThreadPool(2);
         try {
@@ -172,47 +171,11 @@ class PipelineDeadlineTest {
     }
 
     @Test
-    void deadline_enforced_while_waiting_for_concurrent_foreach_window() {
-        // A concurrent foreach window where one item sleeps well past the deadline.
-        // Without the fix, future.get() had no timeout and would block indefinitely.
-        Step<String, String> slowItem = Step.of("item", String.class, String.class, (s, ctx) -> {
-            if ("item-0".equals(s)) sleepUninterruptibly(500);
-            return s;
-        });
-
-        @SuppressWarnings({"unchecked", "rawtypes"})
-        Step<String, List<String>> toList = (Step) Step.of("to-list", String.class, List.class,
-            (s, ctx) -> List.of("item-0", "item-1"));
-
-        java.util.concurrent.ExecutorService exec = java.util.concurrent.Executors.newFixedThreadPool(2);
-        try {
-            @SuppressWarnings({"unchecked", "rawtypes"})
-            Pipeline<String, ?> pipeline = (Pipeline<String, ?>) (Pipeline) PipelineBuilder.start(String.class)
-                .then(toList)
-                .foreach(slowItem, 2)
-                .withExecutor(exec)
-                .withDeadline(50)
-                .build();
-
-            long start = System.currentTimeMillis();
-            Result<?> result = pipeline.execute("x");
-            long elapsed = System.currentTimeMillis() - start;
-
-            assertThat(result).isInstanceOf(Failure.class);
-            assertThat(((Failure<?>) result).cause()).isInstanceOf(PipelineDeadlineExceededException.class);
-            assertThat(((Failure<?>) result).failedStepId()).isEqualTo("pipeline.deadline");
-            assertThat(elapsed).isLessThan(400);
-        } finally {
-            exec.shutdown();
-        }
-    }
-
-    @Test
     void no_deadline_by_default() {
-        Step<String, String> step = Step.of("step", String.class, String.class, (s, ctx) -> {
+        Step<String, String> step = Step.builder("step", String.class, String.class).execute((s, ctx) -> {
             sleepUninterruptibly(30);
             return s;
-        });
+        }).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
             .then(step)
@@ -231,7 +194,7 @@ class PipelineDeadlineTest {
     void withDeadline_zero_throws_illegal_argument() {
         assertThatThrownBy(() ->
             PipelineBuilder.start(String.class)
-                .then(Step.of("s", String.class, String.class, (s, ctx) -> s))
+                .then(Step.builder("s", String.class, String.class).execute((s, ctx) -> s).build())
                 .withDeadline(0)
         ).isInstanceOf(IllegalArgumentException.class);
     }
@@ -240,14 +203,14 @@ class PipelineDeadlineTest {
     void withDeadline_negative_throws_illegal_argument() {
         assertThatThrownBy(() ->
             PipelineBuilder.start(String.class)
-                .then(Step.of("s", String.class, String.class, (s, ctx) -> s))
+                .then(Step.builder("s", String.class, String.class).execute((s, ctx) -> s).build())
                 .withDeadline(-1)
         ).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void withDeadline_timeunit_overload_works() {
-        Step<String, String> fast = Step.of("fast", String.class, String.class, (s, ctx) -> s);
+        Step<String, String> fast = Step.builder("fast", String.class, String.class).execute((s, ctx) -> s).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
             .then(fast)
@@ -261,14 +224,14 @@ class PipelineDeadlineTest {
     void withDeadline_set_before_structural_method_is_preserved() {
         AtomicBoolean secondRan = new AtomicBoolean(false);
 
-        Step<String, String> slow = Step.of("slow", String.class, String.class, (s, ctx) -> {
+        Step<String, String> slow = Step.builder("slow", String.class, String.class).execute((s, ctx) -> {
             sleepUninterruptibly(150);
             return s;
-        });
-        Step<String, String> second = Step.of("second", String.class, String.class, (s, ctx) -> {
+        }).build();
+        Step<String, String> second = Step.builder("second", String.class, String.class).execute((s, ctx) -> {
             secondRan.set(true);
             return s;
-        });
+        }).build();
 
         // withDeadline set on the builder BEFORE the second .then() — must still apply
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)

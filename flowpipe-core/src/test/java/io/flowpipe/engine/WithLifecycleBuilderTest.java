@@ -13,7 +13,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class WithLifecycleBuilderTest {
 
     private static Step<String, String> pass(String id) {
-        return Step.of(id, String.class, String.class, (input, ctx) -> input);
+        return Step.builder(id, String.class, String.class).execute((input, ctx) -> input).build();
     }
 
     @Test

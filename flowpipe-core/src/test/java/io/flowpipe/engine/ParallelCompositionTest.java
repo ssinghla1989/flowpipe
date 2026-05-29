@@ -40,14 +40,14 @@ class ParallelCompositionTest {
         AtomicReference<String> seenA = new AtomicReference<>();
         AtomicReference<String> seenB = new AtomicReference<>();
 
-        Step<String, String> stepA = Step.of("a", String.class, String.class, (s, ctx) -> {
+        Step<String, String> stepA = Step.builder("a", String.class, String.class).execute((s, ctx) -> {
             seenA.set(s);
             return s;
-        });
-        Step<String, String> stepB = Step.of("b", String.class, String.class, (s, ctx) -> {
+        }).build();
+        Step<String, String> stepB = Step.builder("b", String.class, String.class).execute((s, ctx) -> {
             seenB.set(s);
             return s;
-        });
+        }).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
             .parallel2(String.class, (a, b) -> a, stepA, stepB)
@@ -65,7 +65,7 @@ class ParallelCompositionTest {
         CountDownLatch bStarted = new CountDownLatch(1);
 
         // stepA waits until stepB has signalled, ensuring stepB completes first
-        Step<String, String> stepA = Step.of("a", String.class, String.class, (s, ctx) -> {
+        Step<String, String> stepA = Step.builder("a", String.class, String.class).execute((s, ctx) -> {
             try {
                 bStarted.await();
             } catch (InterruptedException e) {
@@ -73,11 +73,11 @@ class ParallelCompositionTest {
                 throw new RuntimeException(e);
             }
             return "A";
-        });
-        Step<String, String> stepB = Step.of("b", String.class, String.class, (s, ctx) -> {
+        }).build();
+        Step<String, String> stepB = Step.builder("b", String.class, String.class).execute((s, ctx) -> {
             bStarted.countDown();
             return "B";
-        });
+        }).build();
 
         ExecutorService exec = Executors.newFixedThreadPool(2);
         try {
@@ -100,13 +100,12 @@ class ParallelCompositionTest {
     void one_failing_branch_produces_failure_and_skips_subsequent_steps() {
         AtomicReference<Boolean> afterRan = new AtomicReference<>(false);
 
-        Step<String, String> stepA = Step.of("a", String.class, String.class, (s, ctx) -> s);
-        Step<String, String> stepB = Step.of("b", String.class, String.class,
-            (s, ctx) -> { throw new RuntimeException("boom"); });
-        Step<String, String> after = Step.of("after", String.class, String.class, (s, ctx) -> {
+        Step<String, String> stepA = Step.builder("a", String.class, String.class).execute((s, ctx) -> s).build();
+        Step<String, String> stepB = Step.builder("b", String.class, String.class).execute((s, ctx) -> { throw new RuntimeException("boom"); }).build();
+        Step<String, String> after = Step.builder("after", String.class, String.class).execute((s, ctx) -> {
             afterRan.set(true);
             return s;
-        });
+        }).build();
 
         ExecutorService exec = Executors.newFixedThreadPool(2);
         try {
@@ -130,9 +129,8 @@ class ParallelCompositionTest {
     @Test
     void failure_cause_is_original_branch_exception() {
         IllegalStateException root = new IllegalStateException("root cause");
-        Step<String, String> stepA = Step.of("a", String.class, String.class, (s, ctx) -> s);
-        Step<String, String> stepB = Step.of("b", String.class, String.class,
-            (s, ctx) -> { throw root; });
+        Step<String, String> stepA = Step.builder("a", String.class, String.class).execute((s, ctx) -> s).build();
+        Step<String, String> stepB = Step.builder("b", String.class, String.class).execute((s, ctx) -> { throw root; }).build();
 
         ExecutorService exec = Executors.newFixedThreadPool(2);
         try {
@@ -153,8 +151,8 @@ class ParallelCompositionTest {
     // 5.5 — parallel2 advances builder output type to combiner return type (compile-time check)
     @Test
     void parallel2_advances_output_type_to_combiner_return_type() {
-        Step<String, String> stepA = Step.of("a", String.class, String.class, (s, ctx) -> s);
-        Step<String, Integer> stepB = Step.of("b", String.class, Integer.class, (s, ctx) -> s.length());
+        Step<String, String> stepA = Step.builder("a", String.class, String.class).execute((s, ctx) -> s).build();
+        Step<String, Integer> stepB = Step.builder("b", String.class, Integer.class).execute((s, ctx) -> s.length()).build();
 
         // Combiner: BiFunction<String, Integer, String> — result type is String, no cast needed
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
@@ -173,8 +171,8 @@ class ParallelCompositionTest {
     void per_branch_start_and_finish_events_are_emitted() {
         appender = Slf4jTestAppender.attachToEngine();
 
-        Step<String, String> stepA = Step.of("stepA", String.class, String.class, (s, ctx) -> s);
-        Step<String, String> stepB = Step.of("stepB", String.class, String.class, (s, ctx) -> s);
+        Step<String, String> stepA = Step.builder("stepA", String.class, String.class).execute((s, ctx) -> s).build();
+        Step<String, String> stepB = Step.builder("stepB", String.class, String.class).execute((s, ctx) -> s).build();
 
         ExecutorService exec = Executors.newFixedThreadPool(2);
         try {
@@ -211,9 +209,8 @@ class ParallelCompositionTest {
     void failing_branch_produces_step_error_not_step_finish() {
         appender = Slf4jTestAppender.attachToEngine();
 
-        Step<String, String> stable = Step.of("stable", String.class, String.class, (s, ctx) -> s);
-        Step<String, String> unstable = Step.of("unstable", String.class, String.class,
-            (s, ctx) -> { throw new RuntimeException("boom"); });
+        Step<String, String> stable = Step.builder("stable", String.class, String.class).execute((s, ctx) -> s).build();
+        Step<String, String> unstable = Step.builder("unstable", String.class, String.class).execute((s, ctx) -> { throw new RuntimeException("boom"); }).build();
 
         ExecutorService exec = Executors.newFixedThreadPool(2);
         try {
@@ -242,8 +239,8 @@ class ParallelCompositionTest {
     void per_branch_recorder_receives_duration_attempts_outcome() {
         TestMetricsRecorder rec = new TestMetricsRecorder();
 
-        Step<String, String> stepA = Step.of("a", String.class, String.class, (s, ctx) -> s);
-        Step<String, String> stepB = Step.of("b", String.class, String.class, (s, ctx) -> s);
+        Step<String, String> stepA = Step.builder("a", String.class, String.class).execute((s, ctx) -> s).build();
+        Step<String, String> stepB = Step.builder("b", String.class, String.class).execute((s, ctx) -> s).build();
 
         ExecutorService exec = Executors.newFixedThreadPool(2);
         try {
@@ -270,8 +267,8 @@ class ParallelCompositionTest {
     // 5.9 — Success trace contains entries for all branches
     @Test
     void success_trace_contains_entries_for_all_branches() {
-        Step<String, String> stepA = Step.of("a", String.class, String.class, (s, ctx) -> s);
-        Step<String, String> stepB = Step.of("b", String.class, String.class, (s, ctx) -> s);
+        Step<String, String> stepA = Step.builder("a", String.class, String.class).execute((s, ctx) -> s).build();
+        Step<String, String> stepB = Step.builder("b", String.class, String.class).execute((s, ctx) -> s).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
             .parallel2(String.class, (a, b) -> a, stepA, stepB)
@@ -291,8 +288,8 @@ class ParallelCompositionTest {
         ExecutorService exec = Executors.newSingleThreadExecutor();
         exec.shutdown();
 
-        Step<String, String> stepA = Step.of("a", String.class, String.class, (s, ctx) -> s);
-        Step<String, String> stepB = Step.of("b", String.class, String.class, (s, ctx) -> s);
+        Step<String, String> stepA = Step.builder("a", String.class, String.class).execute((s, ctx) -> s).build();
+        Step<String, String> stepB = Step.builder("b", String.class, String.class).execute((s, ctx) -> s).build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
             .parallel2(String.class, (a, b) -> a, stepA, stepB)
@@ -307,7 +304,7 @@ class ParallelCompositionTest {
     // 5.11 — build() rejects a parallelN block with fewer than 2 branches
     @Test
     void build_rejects_parallelN_with_fewer_than_two_branches() {
-        Step<String, String> only = Step.of("only", String.class, String.class, (s, ctx) -> s);
+        Step<String, String> only = Step.builder("only", String.class, String.class).execute((s, ctx) -> s).build();
         Map<String, Step<String, ?>> singleEntry = new LinkedHashMap<>();
         singleEntry.put("only", only);
 
@@ -322,9 +319,9 @@ class ParallelCompositionTest {
     // 5.12 — build() rejects a step id duplicated across a sequential step and a parallel branch
     @Test
     void build_rejects_duplicate_id_across_sequential_and_parallel() {
-        Step<String, String> seq = Step.of("validate", String.class, String.class, (s, ctx) -> s);
-        Step<String, String> branchA = Step.of("validate", String.class, String.class, (s, ctx) -> s);
-        Step<String, String> branchB = Step.of("other", String.class, String.class, (s, ctx) -> s);
+        Step<String, String> seq = Step.builder("validate", String.class, String.class).execute((s, ctx) -> s).build();
+        Step<String, String> branchA = Step.builder("validate", String.class, String.class).execute((s, ctx) -> s).build();
+        Step<String, String> branchB = Step.builder("other", String.class, String.class).execute((s, ctx) -> s).build();
 
         assertThatThrownBy(() ->
             PipelineBuilder.start(String.class)
@@ -338,8 +335,8 @@ class ParallelCompositionTest {
     // 5.13 — build() rejects a parallelN map key that disagrees with the step's descriptor id
     @Test
     void build_rejects_parallelN_key_that_disagrees_with_step_id() {
-        Step<String, String> real = Step.of("real-name", String.class, String.class, (s, ctx) -> s);
-        Step<String, String> other = Step.of("other", String.class, String.class, (s, ctx) -> s);
+        Step<String, String> real = Step.builder("real-name", String.class, String.class).execute((s, ctx) -> s).build();
+        Step<String, String> other = Step.builder("other", String.class, String.class).execute((s, ctx) -> s).build();
         Map<String, Step<String, ?>> steps = new LinkedHashMap<>();
         steps.put("alias", real);
         steps.put("other", other);
@@ -365,10 +362,10 @@ class ParallelCompositionTest {
     @Test
     @SuppressWarnings({"unchecked", "rawtypes"})
     void then_after_parallel2_rejects_downstream_type_mismatch() {
-        Step<String, String> stepA = Step.of("a", String.class, String.class, (s, ctx) -> s);
-        Step<String, String> stepB = Step.of("b", String.class, String.class, (s, ctx) -> s);
+        Step<String, String> stepA = Step.builder("a", String.class, String.class).execute((s, ctx) -> s).build();
+        Step<String, String> stepB = Step.builder("b", String.class, String.class).execute((s, ctx) -> s).build();
         // Raw Step to bypass compile-time checking and reach the runtime guard in then()
-        Step rawWrongNext = Step.of("wrong", Integer.class, Integer.class, (n, ctx) -> n);
+        Step rawWrongNext = Step.builder("wrong", Integer.class, Integer.class).execute((n, ctx) -> n).build();
 
         assertThatThrownBy(() ->
             PipelineBuilder.start(String.class)
@@ -383,8 +380,8 @@ class ParallelCompositionTest {
     // combiner returning null surfaces as Failure with NullPointerException
     @Test
     void combiner_returning_null_surfaces_as_failure() {
-        Step<String, String> a = Step.of("a", String.class, String.class, (s, ctx) -> "a");
-        Step<String, String> b = Step.of("b", String.class, String.class, (s, ctx) -> "b");
+        Step<String, String> a = Step.builder("a", String.class, String.class).execute((s, ctx) -> "a").build();
+        Step<String, String> b = Step.builder("b", String.class, String.class).execute((s, ctx) -> "b").build();
 
         Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
             .parallel2(String.class, (x, y) -> null, a, b)
@@ -402,8 +399,8 @@ class ParallelCompositionTest {
     // 5.15 — parallelN combiner receives a Map keyed by step ids with correct output values
     @Test
     void parallelN_combiner_receives_map_keyed_by_step_ids() {
-        Step<String, Integer> x = Step.of("x", String.class, Integer.class, (s, ctx) -> 1);
-        Step<String, Integer> y = Step.of("y", String.class, Integer.class, (s, ctx) -> 2);
+        Step<String, Integer> x = Step.builder("x", String.class, Integer.class).execute((s, ctx) -> 1).build();
+        Step<String, Integer> y = Step.builder("y", String.class, Integer.class).execute((s, ctx) -> 2).build();
 
         Map<String, Step<String, ?>> steps = new LinkedHashMap<>();
         steps.put("x", x);
