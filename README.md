@@ -370,119 +370,6 @@ FlowPipe **never** shuts down the executor it is given — lifecycle is the call
 
 ---
 
-## Pipeline composition
-
-`Pipeline.asStep(String id)` turns any `Pipeline<I,O>` into a `Step<I,O>`, enabling pipelines to be nested inside other pipelines anywhere a step is accepted — `.then()`, `.foreach()`, `.parallel2/3/4/N()`, and `.branch()`.
-
-### Basic nesting with `.then()`
-
-```java
-// Inner pipeline: parse a string, then double the integer
-Pipeline<String, Integer> transform = PipelineBuilder.start(String.class)
-    .then(parseStep)    // Step<String, Integer>
-    .then(doublerStep)  // Step<Integer, Integer>
-    .build();
-
-// Outer pipeline: run the inner pipeline, then add 10
-Pipeline<String, Integer> outer = PipelineBuilder.start(String.class)
-    .then(transform.asStep("transform"))  // id as seen by the outer pipeline
-    .then(addTenStep)
-    .build();
-
-// execute("5") → transform produces 10, outer produces 20
-```
-
-The string passed to `asStep()` is the step id the outer pipeline uses for logging, metrics, and the `ExecutionTrace`. Inner step ids never appear in the outer trace — each pipeline maintains its own trace.
-
-### Scatter-gather with `.foreach()`
-
-The primary pattern for applying a multi-step sub-pipeline to every element of a list:
-
-```java
-// Inner pipeline: trim whitespace, then uppercase
-Pipeline<String, String> enrich = PipelineBuilder.start(String.class)
-    .then(trimStep)
-    .then(upperStep)
-    .build();
-
-// Outer pipeline: split input into a list, then enrich each element
-Pipeline<String, List<String>> outer = PipelineBuilder.start(String.class)
-    .then(splitStep)                  // Step<String, List<String>>
-    .foreach(enrich.asStep("enrich")) // applies the full inner pipeline per element
-    .build();
-
-// execute(" hello , world ") → ["HELLO", "WORLD"]
-```
-
-Add a concurrency parameter to process elements in parallel windows:
-
-```java
-.foreach(enrich.asStep("enrich"), 8)  // up to 8 concurrent element executions
-```
-
-### Parallel branches as pipelines
-
-```java
-Pipeline<String, String> wordStats = PipelineBuilder.start(String.class)
-    .then(wordCountStep)  // Step<String, Integer>
-    .then(formatStep)     // Step<Integer, String>
-    .build();
-
-Pipeline<String, String> outer = PipelineBuilder.start(String.class)
-    .parallel2(
-        String.class,
-        (wordResult, chars) -> wordResult + " chars=" + chars,
-        wordStats.asStep("word-stats"),  // full pipeline as a parallel branch
-        charCountStep)
-    .build();
-```
-
-### Failure propagation
-
-When the inner pipeline fails, the original exception becomes `Failure.cause()` in the outer pipeline. The `failedStepId()` is the adapter step's id, not the id of the inner step that threw — the outer pipeline's failure surface remains stable regardless of inner structure.
-
-```java
-Result<Integer> result = outer.execute("not-a-number");
-if (result instanceof Failure<Integer> f) {
-    f.failedStepId(); // "transform" — the adapter step id
-    f.cause();        // NumberFormatException from inside the inner pipeline
-}
-```
-
-### Context propagation and state isolation
-
-The outer pipeline's `RequestContext` (tenant id, trace id, etc.) is forwarded into the inner pipeline automatically. Inner `State` is isolated — each inner pipeline execution creates its own `State`, independent of the outer pipeline's `State`.
-
-### Observability
-
-The outer pipeline emits one `step.start` / `step.finish` pair for the adapter step. The inner pipeline emits its own events for each of its steps. If both pipelines have `MetricsRecorder`s configured, both record independently. Configure the inner pipeline with `.withMetrics(recorder)` at build time to give it its own recorder.
-
-### Resilience on the adapter step
-
-Policies on the adapter step wrap the **entire** inner pipeline invocation — a retry retries the whole inner pipeline from the beginning, not an individual inner step.
-
-```java
-Step<String, String> base = inner.asStep("retriable-sub");
-Step<String, String> withRetry = new Step<>() {
-    @Override
-    public StepDescriptor<String, String> describe() {
-        return StepDescriptor.builder("retriable-sub", String.class, String.class)
-            .withRetry(RetryPolicy.fixed(3, 50))
-            .build();
-    }
-    @Override
-    public String execute(String input, StepContext ctx) throws Exception {
-        return base.execute(input, ctx);
-    }
-};
-
-Pipeline<String, String> outer = PipelineBuilder.start(String.class)
-    .then(withRetry)
-    .build();
-```
-
----
-
 ## Conditional branching
 
 Route execution down one of two typed sub-pipelines based on a predicate. Both arms must accept the same input type and produce the same output type — verified at `build()` time.
@@ -548,7 +435,7 @@ Pipeline<List<String>, List<UserProfile>> pipeline = PipelineBuilder
 
 Sequential foreach preserves element order. Concurrent foreach (`concurrency > 1`) processes elements in windows of that size using the pipeline's executor; output order matches input order regardless of completion order within a window.
 
-For multi-step processing per element, use `Pipeline.asStep()` inside `foreach` — see [Scatter-gather](#scatter-gather-with-foreach).
+For multi-step processing per element, wrap the logic in a single `Step` implementation that calls each sub-step directly.
 
 ---
 
@@ -699,7 +586,7 @@ All three methods have default no-op implementations on the interface, so you on
 
 If `onStart` throws, execution halts immediately (no steps run) and the pipeline returns a `Failure` with `failedStepId="pipeline.onStart"`. `onFinish` and `onError` are still called with that failure so clean-up and alerting hooks always fire.
 
-Hooks fire at the **top-level pipeline boundary only**. Sub-pipelines used inside `.branch()` arms or as steps via `.asStep()` do not re-fire the parent pipeline's hooks.
+Hooks fire at the **top-level pipeline boundary only**. Sub-pipelines used inside `.branch()` arms do not re-fire the parent pipeline's hooks.
 
 ---
 
