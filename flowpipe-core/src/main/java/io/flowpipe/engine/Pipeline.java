@@ -776,11 +776,4 @@ public final class Pipeline<I, O> {
         }
     }
 
-    MetricsRecorder defaultRecorder() {
-        return defaultRecorder;
-    }
-
-    SpanRecorder spanRecorder() {
-        return spanRecorder;
-    }
 }
