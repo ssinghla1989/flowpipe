@@ -693,6 +693,8 @@ Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
 
 `startStep` is called before the first attempt; `finishStep` is called after the final outcome — success, failure, or circuit-breaker trip. Skipped branch arm steps also fire both callbacks with `StepOutcome.SKIPPED`. Exceptions from either method are suppressed and logged as `tracing.recorder_failed` warnings.
 
+**Branch arm pipelines inherit the outer recorder automatically.** You do not need to call `.withTracing()` on arm pipelines — the recorder registered on the outer pipeline propagates into every arm, including deeply nested branches. The same applies to `MetricsRecorder`. Registering a recorder on a branch arm pipeline directly has no effect during normal pipeline execution, since the outer recorder takes precedence.
+
 ---
 
 ## Input/output validation

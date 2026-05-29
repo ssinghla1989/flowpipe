@@ -148,7 +148,7 @@ public final class Pipeline<I, O> {
             : Long.MAX_VALUE;
 
         @SuppressWarnings("unchecked")
-        Result<O> result = (Result<O>) executeShared(input, ctx, context, recorder, traceBuilder, deadlineNs);
+        Result<O> result = (Result<O>) executeShared(input, ctx, context, recorder, spanRecorder, traceBuilder, deadlineNs);
 
         safeLifecycleCall("onFinish", () -> lifecycle.onFinish(result, ctx));
         if (result instanceof Failure<O> failure) {
@@ -177,9 +177,11 @@ public final class Pipeline<I, O> {
     }
 
     // Package-private: called by executeBranch on arm pipelines to share State/context/recorder/traceBuilder.
+    // spanRecorder is passed explicitly (not via this.spanRecorder) so the outer pipeline's recorder
+    // propagates into branch arm pipelines, which may have been built with a different (or no) recorder.
     Result<?> executeShared(Object input, DefaultStepContext ctx, RequestContext context,
-                            MetricsRecorder recorder, ExecutionTrace.Builder traceBuilder,
-                            long deadlineNs) {
+                            MetricsRecorder recorder, SpanRecorder spanRecorder,
+                            ExecutionTrace.Builder traceBuilder, long deadlineNs) {
         Object current = input;
         for (EngineNode<?, ?> node : nodes) {
             if (deadlineNs != Long.MAX_VALUE && System.nanoTime() > deadlineNs) {
@@ -188,26 +190,26 @@ public final class Pipeline<I, O> {
             }
             if (node instanceof StepNode<?, ?> sn) {
                 String stepId = sn.step().describe().id();
-                ItemResult result = executeItemWithRetry(sn.step(), current, stepId, ctx, context, recorder);
+                ItemResult result = executeItemWithRetry(sn.step(), current, stepId, ctx, context, recorder, spanRecorder);
                 traceBuilder.append(result.trace());
                 if (result instanceof ItemFailure f) {
                     return new Failure<>(f.cause(), f.stepId(), traceBuilder.build());
                 }
                 current = ((ItemSuccess) result).value();
             } else if (node instanceof ParallelNode<?, ?> pn) {
-                ParallelOutcome parallelResult = executeParallel(pn, current, ctx, context, recorder, traceBuilder, deadlineNs);
+                ParallelOutcome parallelResult = executeParallel(pn, current, ctx, context, recorder, spanRecorder, traceBuilder, deadlineNs);
                 if (parallelResult instanceof ParallelFailure pf) {
                     return pf.failure();
                 }
                 current = ((ParallelSuccess) parallelResult).value();
             } else if (node instanceof BranchNode<?, ?> bn) {
-                BranchOutcome branchResult = executeBranch(bn, current, ctx, context, recorder, traceBuilder, deadlineNs);
+                BranchOutcome branchResult = executeBranch(bn, current, ctx, context, recorder, spanRecorder, traceBuilder, deadlineNs);
                 if (branchResult instanceof BranchFailure bf) {
                     return bf.failure();
                 }
                 current = ((BranchSuccess) branchResult).value();
             } else if (node instanceof ForeachNode<?, ?> fn) {
-                ForeachOutcome foreachResult = executeForeach(fn, current, ctx, context, recorder, traceBuilder, deadlineNs);
+                ForeachOutcome foreachResult = executeForeach(fn, current, ctx, context, recorder, spanRecorder, traceBuilder, deadlineNs);
                 if (foreachResult instanceof ForeachFailure ff) {
                     return ff.failure();
                 }
@@ -228,7 +230,7 @@ public final class Pipeline<I, O> {
     @SuppressWarnings({"rawtypes", "unchecked"})
     private ItemResult executeItemWithRetry(Step step, Object input, String itemLabel,
                                             DefaultStepContext stepCtx, RequestContext context,
-                                            MetricsRecorder recorder) {
+                                            MetricsRecorder recorder, SpanRecorder spanRecorder) {
         RetryPolicy fpRetry = step.describe().retryPolicy();
         io.flowpipe.api.TimeoutPolicy fpTimeout = step.describe().timeoutPolicy();
         int maxAttempts = fpRetry.maxAttempts();
@@ -359,6 +361,7 @@ public final class Pipeline<I, O> {
     @SuppressWarnings({"unchecked", "rawtypes"})
     private BranchOutcome executeBranch(BranchNode bn, Object input, DefaultStepContext ctx,
                                         RequestContext context, MetricsRecorder recorder,
+                                        SpanRecorder spanRecorder,
                                         ExecutionTrace.Builder traceBuilder, long deadlineNs) {
         String branchId = bn.branchId();
         long startedAtNanos = System.nanoTime();
@@ -378,7 +381,7 @@ public final class Pipeline<I, O> {
         Pipeline takenArm = selected ? bn.ifTrue() : bn.ifFalse();
         Pipeline skippedArm = selected ? bn.ifFalse() : bn.ifTrue();
 
-        Result<?> armResult = takenArm.executeShared(input, ctx, context, recorder, traceBuilder, deadlineNs);
+        Result<?> armResult = takenArm.executeShared(input, ctx, context, recorder, spanRecorder, traceBuilder, deadlineNs);
         if (armResult instanceof Failure<?> f) {
             return new BranchFailure((Failure<Object>) f);
         }
@@ -430,6 +433,7 @@ public final class Pipeline<I, O> {
     @SuppressWarnings({"unchecked", "rawtypes"})
     private ParallelOutcome executeParallel(ParallelNode pn, Object input, DefaultStepContext ctx,
                                             RequestContext context, MetricsRecorder recorder,
+                                            SpanRecorder spanRecorder,
                                             ExecutionTrace.Builder traceBuilder, long deadlineNs) {
         List<Step<Object, ?>> branches = pn.branches();
         List<Future<ItemResult>> futures = new ArrayList<>(branches.size());
@@ -437,7 +441,7 @@ public final class Pipeline<I, O> {
         for (Step<Object, ?> branch : branches) {
             try {
                 futures.add(executor.submit(
-                    () -> executeItemWithRetry(branch, input, branch.describe().id(), ctx, context, recorder)));
+                    () -> executeItemWithRetry(branch, input, branch.describe().id(), ctx, context, recorder, spanRecorder)));
             } catch (RejectedExecutionException e) {
                 cancelAll(futures);
                 return new ParallelFailure(new Failure<>(e, branch.describe().id(), traceBuilder.build()));
@@ -500,6 +504,7 @@ public final class Pipeline<I, O> {
     @SuppressWarnings("rawtypes")
     private ForeachOutcome executeForeach(ForeachNode fn, Object input, DefaultStepContext ctx,
                                           RequestContext context, MetricsRecorder recorder,
+                                          SpanRecorder spanRecorder,
                                           ExecutionTrace.Builder traceBuilder, long deadlineNs) {
         List<?> items = (List<?>) input;
         String stepId = fn.step().describe().id();
@@ -513,7 +518,7 @@ public final class Pipeline<I, O> {
                         new PipelineDeadlineExceededException(deadlineMs), "pipeline.deadline", traceBuilder.build()));
                 }
                 String itemLabel = stepId + "[" + i + "]";
-                ItemResult result = executeItemWithRetry(fn.step(), items.get(i), itemLabel, ctx, context, recorder);
+                ItemResult result = executeItemWithRetry(fn.step(), items.get(i), itemLabel, ctx, context, recorder, spanRecorder);
                 traceBuilder.append(result.trace());
                 if (result instanceof ItemFailure f) {
                     return new ForeachFailure(new Failure<>(f.cause(), f.stepId(), traceBuilder.build()));
@@ -534,7 +539,7 @@ public final class Pipeline<I, O> {
                     final String itemLabel = stepId + "[" + index + "]";
                     try {
                         futures.add(executor.submit(
-                            () -> executeItemWithRetry(fn.step(), items.get(index), itemLabel, ctx, context, recorder)));
+                            () -> executeItemWithRetry(fn.step(), items.get(index), itemLabel, ctx, context, recorder, spanRecorder)));
                     } catch (RejectedExecutionException e) {
                         cancelAll(futures);
                         return new ForeachFailure(new Failure<>(e, stepId, traceBuilder.build()));

@@ -240,9 +240,45 @@ class EngineFixesTest {
 
         pipeline.execute(5);
 
-        // The outer recorder sees SKIPPED spans via emitSkipped (which passes the outer spanRecorder).
-        // Execution spans for the taken arm use the arm pipeline's own (NoOp) recorder.
         assertThat(finishEvents).contains("decrement:SKIPPED");
+    }
+
+    @Test
+    void span_recorder_propagates_into_branch_arm_steps() {
+        List<String> events = new ArrayList<>();
+
+        SpanRecorder recorder = new SpanRecorder() {
+            @Override
+            public Object startStep(String stepId, RequestContext context) {
+                events.add("start:" + stepId);
+                return stepId;
+            }
+            @Override
+            public void finishStep(Object span, StepOutcome outcome, Throwable cause) {
+                events.add("finish:" + span + ":" + outcome);
+            }
+        };
+
+        // Arm pipelines built WITHOUT .withTracing() — the outer recorder must still propagate.
+        Step<String, String> trueStep  = Step.of("arm.true",  String.class, String.class, (s, ctx) -> s + "-T");
+        Step<String, String> falseStep = Step.of("arm.false", String.class, String.class, (s, ctx) -> s + "-F");
+        Pipeline<String, String> ifTrue  = PipelineBuilder.start(String.class).then(trueStep).build();
+        Pipeline<String, String> ifFalse = PipelineBuilder.start(String.class).then(falseStep).build();
+
+        Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
+            .branch("route", (s, ctx) -> s.startsWith("y"), ifTrue, ifFalse)
+            .withTracing(recorder)
+            .build();
+
+        // Take the true arm — arm.true must receive a span from the outer recorder.
+        pipeline.execute("yes");
+
+        // Taken arm: outer recorder receives execution spans.
+        assertThat(events).contains("start:arm.true", "finish:arm.true:SUCCESS");
+        // Skipped arm: outer recorder receives a start+finish(SKIPPED) span pair via emitSkipped.
+        assertThat(events).contains("start:arm.false", "finish:arm.false:SKIPPED");
+        // Skipped arm must not have a SUCCESS span — it was never executed.
+        assertThat(events).doesNotContain("finish:arm.false:SUCCESS");
     }
 
     @Test
