@@ -3,7 +3,6 @@ package io.flowpipe.api;
 import io.flowpipe.state.StateKey;
 
 import java.util.Objects;
-import java.util.function.BiFunction;
 
 public interface Step<I, O> {
 
@@ -54,7 +53,7 @@ public interface Step<I, O> {
     static <I, O> Step<I, O> of(String id,
                                 Class<I> inputType,
                                 Class<O> outputType,
-                                BiFunction<I, StepContext, O> body) {
+                                StepBuilder.Body<I, O> body) {
         Objects.requireNonNull(body, "body");
         StepDescriptor<I, O> descriptor =
             StepDescriptor.builder(id, inputType, outputType).build();
@@ -65,7 +64,7 @@ public interface Step<I, O> {
             }
 
             @Override
-            public O execute(I input, StepContext ctx) {
+            public O execute(I input, StepContext ctx) throws Exception {
                 return body.apply(input, ctx);
             }
         };

@@ -35,7 +35,7 @@ final class FailsafePolicies {
 
         if (fp.initialDelayMs() > 0) {
             if (fp.multiplier() > 1.0) {
-                builder.withBackoff(fp.initialDelayMs(), Long.MAX_VALUE, ChronoUnit.MILLIS, fp.multiplier());
+                builder.withBackoff(fp.initialDelayMs(), fp.maxDelayMs(), ChronoUnit.MILLIS, fp.multiplier());
             } else {
                 // multiplier == 1.0 → constant delay; withBackoff requires factor > 1
                 builder.withDelay(Duration.ofMillis(fp.initialDelayMs()));

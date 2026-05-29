@@ -46,7 +46,7 @@ class RetryTest {
     void retry_policy_rejects_max_attempts_less_than_one() {
         assertThatThrownBy(() -> RetryPolicy.fixed(0, 100))
             .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> RetryPolicy.exponential(0, 100, 2.0, false))
+        assertThatThrownBy(() -> RetryPolicy.exponential(0, 100, 30_000, 2.0, false))
             .isInstanceOf(IllegalArgumentException.class);
     }
 
@@ -54,14 +54,28 @@ class RetryTest {
     void retry_policy_rejects_negative_initial_delay() {
         assertThatThrownBy(() -> RetryPolicy.fixed(2, -1))
             .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> RetryPolicy.exponential(2, -1, 2.0, false))
+        assertThatThrownBy(() -> RetryPolicy.exponential(2, -1, 30_000, 2.0, false))
             .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void retry_policy_rejects_multiplier_below_one() {
-        assertThatThrownBy(() -> RetryPolicy.exponential(2, 100, 0.9, false))
+        assertThatThrownBy(() -> RetryPolicy.exponential(2, 100, 30_000, 0.9, false))
             .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void retry_policy_exponential_rejects_zero_initial_delay() {
+        assertThatThrownBy(() -> RetryPolicy.exponential(2, 0, 30_000, 2.0, false))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("use RetryPolicy.fixed()");
+    }
+
+    @Test
+    void retry_policy_exponential_rejects_max_delay_below_initial_delay() {
+        assertThatThrownBy(() -> RetryPolicy.exponential(2, 500, 100, 2.0, false))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("maxDelayMs");
     }
 
     @Test
@@ -395,7 +409,7 @@ class RetryTest {
         AtomicInteger calls = new AtomicInteger();
         // 4 attempts, 100ms initial delay, 2x multiplier — always fails so we get 3 retries
         Step<Integer, Integer> s = stepWithRetry("s",
-            RetryPolicy.exponential(4, 100, 2.0, false),
+            RetryPolicy.exponential(4, 100, 30_000, 2.0, false),
             (input, ctx) -> { calls.incrementAndGet(); throw new RuntimeException("fail"); });
 
         Pipeline<Integer, Integer> pipeline = PipelineBuilder.start(Integer.class).then(s).build();

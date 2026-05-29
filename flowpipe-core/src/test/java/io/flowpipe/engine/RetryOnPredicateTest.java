@@ -210,7 +210,7 @@ class RetryOnPredicateTest {
     @Test
     void retryOn_with_exponential_backoff_retries_matching_and_stops_on_mismatch() {
         AtomicInteger calls = new AtomicInteger();
-        RetryPolicy policy = RetryPolicy.exponential(5, 0, 2.0, false)
+        RetryPolicy policy = RetryPolicy.fixed(5, 0)
             .retryOn(e -> e instanceof IOException);
 
         Step<String, String> step = stepWith("exp", policy, (s, ctx) -> {

@@ -7,12 +7,13 @@ public final class RetryPolicy {
 
     private final int maxAttempts;
     private final long initialDelayMs;
+    private final long maxDelayMs;
     private final double multiplier;
     private final boolean jitter;
     // null means "retry on any throwable" (default Failsafe behaviour)
     private final Predicate<Throwable> retryPredicate;
 
-    private RetryPolicy(int maxAttempts, long initialDelayMs, double multiplier, boolean jitter,
+    private RetryPolicy(int maxAttempts, long initialDelayMs, long maxDelayMs, double multiplier, boolean jitter,
                         Predicate<Throwable> retryPredicate) {
         if (maxAttempts < 1) {
             throw new IllegalArgumentException("maxAttempts must be >= 1, got: " + maxAttempts);
@@ -25,21 +26,39 @@ public final class RetryPolicy {
         }
         this.maxAttempts = maxAttempts;
         this.initialDelayMs = initialDelayMs;
+        this.maxDelayMs = maxDelayMs;
         this.multiplier = multiplier;
         this.jitter = jitter;
         this.retryPredicate = retryPredicate;
     }
 
     public static RetryPolicy none() {
-        return new RetryPolicy(1, 0L, 1.0, false, null);
+        return new RetryPolicy(1, 0L, 0L, 1.0, false, null);
     }
 
     public static RetryPolicy fixed(int maxAttempts, long delayMs) {
-        return new RetryPolicy(maxAttempts, delayMs, 1.0, false, null);
+        return new RetryPolicy(maxAttempts, delayMs, delayMs, 1.0, false, null);
     }
 
-    public static RetryPolicy exponential(int maxAttempts, long initialDelayMs, double multiplier, boolean jitter) {
-        return new RetryPolicy(maxAttempts, initialDelayMs, multiplier, jitter, null);
+    /**
+     * Exponential backoff. {@code initialDelayMs} is the delay before the second attempt;
+     * each subsequent attempt multiplies the previous delay by {@code multiplier}, capped at
+     * {@code maxDelayMs}. Both {@code initialDelayMs} and {@code maxDelayMs} must be positive,
+     * and {@code maxDelayMs} must be >= {@code initialDelayMs}.
+     */
+    public static RetryPolicy exponential(int maxAttempts, long initialDelayMs, long maxDelayMs,
+                                          double multiplier, boolean jitter) {
+        if (initialDelayMs <= 0) {
+            throw new IllegalArgumentException(
+                "initialDelayMs must be > 0 for exponential backoff, got: " + initialDelayMs
+                    + " — use RetryPolicy.fixed() for no-delay retries");
+        }
+        if (maxDelayMs < initialDelayMs) {
+            throw new IllegalArgumentException(
+                "maxDelayMs must be >= initialDelayMs, got: maxDelayMs=" + maxDelayMs
+                    + ", initialDelayMs=" + initialDelayMs);
+        }
+        return new RetryPolicy(maxAttempts, initialDelayMs, maxDelayMs, multiplier, jitter, null);
     }
 
     /**
@@ -59,7 +78,7 @@ public final class RetryPolicy {
      */
     public RetryPolicy retryOn(Predicate<Throwable> predicate) {
         Objects.requireNonNull(predicate, "predicate");
-        return new RetryPolicy(maxAttempts, initialDelayMs, multiplier, jitter, predicate);
+        return new RetryPolicy(maxAttempts, initialDelayMs, maxDelayMs, multiplier, jitter, predicate);
     }
 
     public int maxAttempts() {
@@ -68,6 +87,10 @@ public final class RetryPolicy {
 
     public long initialDelayMs() {
         return initialDelayMs;
+    }
+
+    public long maxDelayMs() {
+        return maxDelayMs;
     }
 
     public double multiplier() {
@@ -93,19 +116,20 @@ public final class RetryPolicy {
         // retryPredicate excluded: lambdas have no value equality
         return maxAttempts == r.maxAttempts
             && initialDelayMs == r.initialDelayMs
+            && maxDelayMs == r.maxDelayMs
             && Double.compare(multiplier, r.multiplier) == 0
             && jitter == r.jitter;
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(maxAttempts, initialDelayMs, multiplier, jitter);
+        return Objects.hash(maxAttempts, initialDelayMs, maxDelayMs, multiplier, jitter);
     }
 
     @Override
     public String toString() {
         return "RetryPolicy{maxAttempts=" + maxAttempts + ", initialDelayMs=" + initialDelayMs
-            + ", multiplier=" + multiplier + ", jitter=" + jitter
+            + ", maxDelayMs=" + maxDelayMs + ", multiplier=" + multiplier + ", jitter=" + jitter
             + ", retryPredicate=" + (retryPredicate == null ? "any" : "custom") + "}";
     }
 }

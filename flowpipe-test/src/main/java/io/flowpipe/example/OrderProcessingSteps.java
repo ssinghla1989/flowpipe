@@ -34,7 +34,7 @@ public final class OrderProcessingSteps {
 
     // Payment retries once on transient failure: 2 max attempts, 100 ms initial delay, 2× backoff.
     private static final RetryPolicy PAYMENT_RETRY =
-        RetryPolicy.exponential(2, 100L, 2.0, false);
+        RetryPolicy.exponential(2, 100L, 30_000L, 2.0, false);
 
     private OrderProcessingSteps() {}
 
