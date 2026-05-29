@@ -25,7 +25,6 @@ import io.flowpipe.api.Result;
 import io.flowpipe.api.Step;
 import io.flowpipe.api.Success;
 import io.flowpipe.engine.Pipeline;
-import io.flowpipe.engine.PipelineBuilder;
 
 Step<String, Integer> parse = Step.of(
     "parse", String.class, Integer.class,
@@ -35,7 +34,7 @@ Step<Integer, String> describe = Step.of(
     "describe", Integer.class, String.class,
     (input, ctx) -> input >= 0 ? "non-negative" : "negative");
 
-Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
+Pipeline<String, String> pipeline = Pipeline.builder(String.class)
     .then(parse)
     .then(describe)
     .build();
@@ -69,53 +68,67 @@ Step<String, Integer> parse = Step.of(
 
 The id is used in logs, metrics, trace entries, and failure reporting. It must be unique within the pipeline — `build()` will reject duplicates.
 
-### Richer steps with `StepDescriptor`
+### Steps with policies using `Step.builder()`
 
-When you need retry, timeout, circuit breaker, or validation policies attached to a step, build a `StepDescriptor` and implement `Step` directly:
+When you need retry, timeout, circuit breaker, or validation policies, use the fluent builder — all configuration lives in one expression:
 
 ```java
-StepDescriptor<String, UserProfile> desc = StepDescriptor
-    .builder("fetch-profile", String.class, UserProfile.class)
+Step<String, UserProfile> fetchProfile = Step.builder("fetch-profile", String.class, UserProfile.class)
+    .execute((userId, ctx) -> profileService.fetch(userId))
     .withRetry(RetryPolicy.exponential(3, 100, 2.0, true))
     .withTimeout(TimeoutPolicy.ofMillis(500))
     .withCircuitBreaker(CircuitBreakerPolicy.defaults())
-    .inputValidator(input -> {
+    .withInputValidator(input -> {
         if (input == null || input.isBlank())
             throw new ValidationException("userId must not be blank");
     })
     .build();
-
-Step<String, UserProfile> fetchProfile = new Step<>() {
-    @Override public StepDescriptor<String, UserProfile> describe() { return desc; }
-    @Override public UserProfile execute(String userId, StepContext ctx) {
-        return profileService.fetch(userId);
-    }
-};
 ```
 
-All policies on the descriptor are applied transparently by the framework — the `execute` method sees a single call per attempt and writes no retry or timeout code.
+The `.execute()` body accepts checked exceptions directly — no wrapping required. All policies are applied transparently by the framework; the body sees a single call per attempt and writes no retry or timeout code.
 
 A step returning `null` from `execute()` immediately surfaces as `Failure` with a `NullPointerException` naming the offending step, before any output validation runs.
 
+### Reusable step classes
+
+For library steps shared across multiple pipelines, implement `Step<I,O>` directly and return a `StepDescriptor` from `describe()`:
+
+```java
+public class FetchProfileStep implements Step<String, UserProfile> {
+    private final ProfileService profileService;
+
+    public FetchProfileStep(ProfileService profileService) {
+        this.profileService = profileService;
+    }
+
+    @Override
+    public StepDescriptor<String, UserProfile> describe() {
+        return StepDescriptor.builder("fetch-profile", String.class, UserProfile.class)
+            .withRetry(RetryPolicy.fixed(3, 100))
+            .build();
+    }
+
+    @Override
+    public UserProfile execute(String userId, StepContext ctx) throws Exception {
+        return profileService.fetch(userId);
+    }
+}
+```
+
+Use this pattern for steps in shared libraries (like `gpc-commons`) or when the step needs constructor-injected dependencies that vary per caller.
+
 ### Auto-writing step output to state with `withOutputKey`
 
-Declare `withOutputKey(StateKey<O>)` on a `StepDescriptor` and the framework automatically writes the step's validated output to the given state key after every successful execution — no `ctx.state().set(...)` inside `execute()`:
+Declare `withOutputKey(StateKey<O>)` and the framework automatically writes the step's validated output to the given state key after every successful execution — no `ctx.state().set(...)` inside `execute()`:
 
 ```java
 StateKey<UserProfile> PROFILE_KEY = StateKey.of("profile", UserProfile.class);
 
-StepDescriptor<String, UserProfile> desc = StepDescriptor
-    .builder("fetch-profile", String.class, UserProfile.class)
+Step<String, UserProfile> fetchProfile = Step.builder("fetch-profile", String.class, UserProfile.class)
+    .execute((userId, ctx) -> profileService.fetch(userId))  // no state.set() here
     .withRetry(RetryPolicy.fixed(3, 100))
     .withOutputKey(PROFILE_KEY)  // framework writes output to state after execution
     .build();
-
-Step<String, UserProfile> fetchProfile = new Step<>() {
-    @Override public StepDescriptor<String, UserProfile> describe() { return desc; }
-    @Override public UserProfile execute(String userId, StepContext ctx) {
-        return profileService.fetch(userId);  // no state.set() here
-    }
-};
 
 // Any downstream step reads from state directly
 Step<Order, OrderResult> charge = Step.of("charge", Order.class, OrderResult.class,
@@ -938,7 +951,8 @@ Step<String, List<String>> split = Steps.split("split", ",");
 ```
 flowpipe-core/
   src/main/java/
-    io.flowpipe.api          — public surface: Step, StepDescriptor, StepContext,
+    io.flowpipe.api          — public surface: Step (+ Step.builder(...) entry point),
+                               StepBuilder, StepBuilder.Body, StepDescriptor, StepContext,
                                Result, Success, Failure, ExecutionTrace, TraceEntry,
                                RetryPolicy, TimeoutPolicy, CircuitBreakerPolicy,
                                StepTimeoutException, CircuitBreakerOpenException,
@@ -948,7 +962,8 @@ flowpipe-core/
     io.flowpipe.validation   — Validator<T> SPI, ValidationException, NoOpValidator
     io.flowpipe.observability — MetricsRecorder SPI, SpanRecorder SPI, StepOutcome,
                                NoOpMetricsRecorder, NoOpSpanRecorder
-    io.flowpipe.engine       — Pipeline, PipelineBuilder, PipelineBuildException
+    io.flowpipe.engine       — Pipeline (+ Pipeline.builder(...) alias), PipelineBuilder,
+                               PipelineBuildException
                                (internals: FailsafePolicies, EngineNode subtypes)
 
 flowpipe-test/
