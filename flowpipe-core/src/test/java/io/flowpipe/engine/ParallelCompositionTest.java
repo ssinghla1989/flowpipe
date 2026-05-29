@@ -363,19 +363,40 @@ class ParallelCompositionTest {
 
     // 5.16 — then() after parallel2 rejects a type mismatch at build time (regression: was silently bypassed)
     @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
     void then_after_parallel2_rejects_downstream_type_mismatch() {
         Step<String, String> stepA = Step.of("a", String.class, String.class, (s, ctx) -> s);
         Step<String, String> stepB = Step.of("b", String.class, String.class, (s, ctx) -> s);
-        Step<Integer, Integer> wrongNext = Step.of("wrong", Integer.class, Integer.class, (n, ctx) -> n);
+        // Raw Step to bypass compile-time checking and reach the runtime guard in then()
+        Step rawWrongNext = Step.of("wrong", Integer.class, Integer.class, (n, ctx) -> n);
 
         assertThatThrownBy(() ->
             PipelineBuilder.start(String.class)
                 .parallel2(String.class, (a, b) -> a, stepA, stepB)
-                .then(wrongNext)
+                .then(rawWrongNext)
         ).isInstanceOf(PipelineBuildException.class)
             .hasMessageContaining("wrong")
             .hasMessageContaining("Integer")
             .hasMessageContaining("String");
+    }
+
+    // combiner returning null surfaces as Failure with NullPointerException
+    @Test
+    void combiner_returning_null_surfaces_as_failure() {
+        Step<String, String> a = Step.of("a", String.class, String.class, (s, ctx) -> "a");
+        Step<String, String> b = Step.of("b", String.class, String.class, (s, ctx) -> "b");
+
+        Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
+            .parallel2(String.class, (x, y) -> null, a, b)
+            .build();
+
+        Result<String> result = pipeline.execute("in");
+
+        assertThat(result).isInstanceOf(Failure.class);
+        Failure<String> failure = (Failure<String>) result;
+        assertThat(failure.cause()).isInstanceOf(NullPointerException.class);
+        assertThat(failure.cause().getMessage()).contains("combiner");
+        assertThat(failure.failedStepId()).isEqualTo("parallel.combiner");
     }
 
     // 5.15 — parallelN combiner receives a Map keyed by step ids with correct output values

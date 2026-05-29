@@ -248,9 +248,9 @@ class RetryOnPredicateTest {
         assertThat(appender.events("step.error")).hasSize(3);
         assertThat(Slf4jTestAppender.fields(appender.events("step.error").get(0)))
             .containsEntry("step.attempt", 1);
-        assertThat(appender.fields(appender.events("step.error").get(1)))
+        assertThat(Slf4jTestAppender.fields(appender.events("step.error").get(1)))
             .containsEntry("step.attempt", 2);
-        assertThat(appender.fields(appender.events("step.error").get(2)))
+        assertThat(Slf4jTestAppender.fields(appender.events("step.error").get(2)))
             .containsEntry("step.attempt", 3);
     }
 

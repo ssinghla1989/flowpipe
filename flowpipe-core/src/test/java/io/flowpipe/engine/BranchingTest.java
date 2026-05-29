@@ -516,6 +516,52 @@ class BranchingTest {
     // 5.22 single-armed branch: throwing predicate produces Failure with branchId
     // -------------------------------------------------------------------------
 
+    // -------------------------------------------------------------------------
+    // nested branch inside skipped arm emits SKIPPED metrics for the nested branch node
+    // -------------------------------------------------------------------------
+
+    @Test
+    void skipped_arm_containing_nested_branch_emits_skipped_metric_for_nested_branch() {
+        // outer branch predicate always selects ifTrue; ifFalse arm contains an inner branch.
+        // The inner branch should appear as SKIPPED with a recorded metric.
+        Step<Integer, String> innerStep = Step.of("inner-step", Integer.class, String.class, (i, ctx) -> "v" + i);
+        Pipeline<Integer, String> innerArm = PipelineBuilder.start(Integer.class)
+            .then(innerStep)
+            .build();
+        Pipeline<Integer, String> innerFalseArm = PipelineBuilder.start(Integer.class)
+            .then(intToStr("false-leaf"))
+            .build();
+        // The ifFalse pipeline of the outer branch contains its own branch node "inner-branch"
+        Pipeline<Integer, String> outerFalse = PipelineBuilder.start(Integer.class)
+            .branch("inner-branch", (val, ctx) -> val > 0, innerArm, innerFalseArm)
+            .build();
+        // The ifTrue pipeline of the outer branch is a simple step
+        Pipeline<Integer, String> outerTrue = PipelineBuilder.start(Integer.class)
+            .then(intToStr("true-leaf"))
+            .build();
+
+        TestMetricsRecorder recorder = new TestMetricsRecorder();
+        Pipeline<Integer, String> pipeline = PipelineBuilder.start(Integer.class)
+            .branch("outer", (val, ctx) -> true, outerTrue, outerFalse)
+            .withMetrics(recorder)
+            .build();
+
+        pipeline.execute(1);
+
+        // "inner-branch" node is inside the skipped arm — must appear as SKIPPED in metrics
+        List<OutcomeEvent> outcomes = recorder.events().stream()
+            .filter(e -> e instanceof OutcomeEvent)
+            .map(e -> (OutcomeEvent) e)
+            .toList();
+        assertThat(outcomes)
+            .extracting(e -> e.stepId() + "=" + e.outcome())
+            .contains("inner-branch=" + StepOutcome.SKIPPED);
+    }
+
+    // -------------------------------------------------------------------------
+    // 5.22 single-armed branch: throwing predicate produces Failure with branchId
+    // -------------------------------------------------------------------------
+
     @Test
     void single_arm_branch_throwing_predicate_produces_failure_with_branch_id() {
         Pipeline<Integer, Integer> pipeline = PipelineBuilder.start(Integer.class)

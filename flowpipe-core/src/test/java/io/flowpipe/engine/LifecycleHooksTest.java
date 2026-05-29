@@ -162,7 +162,7 @@ class LifecycleHooksTest {
     }
 
     // -------------------------------------------------------------------------
-    // onStart exception halts execution — no steps run, no onFinish/onError
+    // onStart exception halts steps but still fires onFinish and onError
     // -------------------------------------------------------------------------
 
     @Test
@@ -203,7 +203,7 @@ class LifecycleHooksTest {
         assertThat(failure.cause()).isSameAs(boom);
         assertThat(failure.failedStepId()).isEqualTo("pipeline.onStart");
         assertThat(stepCalls).isEmpty();
-        assertThat(hookCalls).isEmpty();
+        assertThat(hookCalls).containsExactly("onFinish", "onError");
     }
 
     // -------------------------------------------------------------------------

@@ -176,6 +176,7 @@ public final class Pipeline<I, O> {
     }
 
     public Result<O> execute(I input, RequestContext context, MetricsRecorder recorder) {
+        Objects.requireNonNull(input, "input");
         Objects.requireNonNull(context, "context");
         Objects.requireNonNull(recorder, "recorder");
         State state = new State();
@@ -458,7 +459,10 @@ public final class Pipeline<I, O> {
                 }
             } else if (node instanceof BranchNode<?, ?> bn) {
                 traceBuilder.append(new TraceEntry(bn.branchId(), 0L, 0L, 0, true));
+                emitRecord(recorder, bn.branchId(), 0L, 0, StepOutcome.SKIPPED);
                 emitSkip(bn.branchId(), branchId, context);
+                Object span = safeStartSpan(spanRecorder, bn.branchId(), context);
+                safeFinishSpan(spanRecorder, span, StepOutcome.SKIPPED, null);
                 emitSkipped(bn.ifTrue().nodes, branchId, recorder, spanRecorder, traceBuilder, context);
                 emitSkipped(bn.ifFalse().nodes, branchId, recorder, spanRecorder, traceBuilder, context);
             } else if (node instanceof ForeachNode<?, ?> fn) {
@@ -526,9 +530,19 @@ public final class Pipeline<I, O> {
             outputs.add(((ItemSuccess) result).value());
         }
 
-        // combiner-free parallel: outputs already written to state via each branch's outputKey;
-        // the input passes through unchanged as the next pipeline value
-        Object combined = (pn.combiner() != null) ? pn.combiner().apply(outputs) : input;
+        Object combined;
+        if (pn.combiner() != null) {
+            combined = pn.combiner().apply(outputs);
+            if (combined == null) {
+                return new ParallelFailure(new Failure<>(
+                    new NullPointerException("parallel combiner returned null; combiner outputs must not be null"),
+                    "parallel.combiner", traceBuilder.build()));
+            }
+        } else {
+            // combiner-free: outputs already written to state via each branch's outputKey;
+            // the input passes through unchanged as the next pipeline value
+            combined = input;
+        }
         return new ParallelSuccess(combined);
     }
 
@@ -579,7 +593,21 @@ public final class Pipeline<I, O> {
                 for (Future<ItemResult> future : futures) {
                     ItemResult result;
                     try {
-                        result = future.get();
+                        if (deadlineNs == Long.MAX_VALUE) {
+                            result = future.get();
+                        } else {
+                            long remainingNs = deadlineNs - System.nanoTime();
+                            if (remainingNs <= 0) {
+                                cancelAll(futures);
+                                return new ForeachFailure(new Failure<>(
+                                    new PipelineDeadlineExceededException(deadlineMs), "pipeline.deadline", traceBuilder.build()));
+                            }
+                            result = future.get(remainingNs, TimeUnit.NANOSECONDS);
+                        }
+                    } catch (TimeoutException e) {
+                        cancelAll(futures);
+                        return new ForeachFailure(new Failure<>(
+                            new PipelineDeadlineExceededException(deadlineMs), "pipeline.deadline", traceBuilder.build()));
                     } catch (ExecutionException e) {
                         cancelAll(futures);
                         return new ForeachFailure(new Failure<>(e.getCause(), stepId, traceBuilder.build()));

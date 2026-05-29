@@ -214,6 +214,8 @@ Result<OrderResult> r2 = pipeline.execute(input, requestContext);
 Result<OrderResult> r3 = pipeline.execute(input, requestContext, metricsRecorder);
 ```
 
+Passing `null` as `input` throws `NullPointerException` immediately, before lifecycle hooks fire or any step runs.
+
 ### The Result type
 
 `Result<O>` is a sealed interface with exactly two implementations:
@@ -273,6 +275,8 @@ Pipeline<String, String> three = PipelineBuilder.start(String.class)
 `Class<R>` is the first argument and enables downstream type-compatibility checking at `build()` time. `parallel4` follows the same pattern with a `QuadFunction<A, B, C, D, R>` combiner.
 
 All branches receive the same input (the current pipeline cursor value). The combiner is called with branch outputs **in declaration order**, not completion order. No subsequent step runs until all branches have either completed or failed.
+
+A combiner returning `null` surfaces immediately as `Failure` with `failedStepId="parallel.combiner"`, consistent with the rule that step and combiner outputs must not be null.
 
 ### `parallelN` — variadic escape hatch for arities above 4
 
@@ -617,6 +621,8 @@ Pipeline<Order, OrderResult> pipeline = PipelineBuilder.start(Order.class)
 
 If the budget is exceeded, execution stops immediately and the pipeline returns a `Failure` whose `cause()` is `PipelineDeadlineExceededException` (which carries `deadlineMs()`) and whose `failedStepId()` is `"pipeline.deadline"`.
 
+The deadline is enforced everywhere futures are awaited: parallel branch futures and concurrent `foreach` item futures. A slow parallel branch or a slow concurrent foreach window cannot hold the pipeline past the deadline.
+
 The per-step `TimeoutPolicy` and the pipeline deadline are orthogonal: a step can have both. The tighter bound wins — whichever fires first terminates that step. The pipeline deadline propagates automatically into branch arm sub-pipelines.
 
 ---
@@ -677,6 +683,8 @@ Pipeline<Order, OrderResult> pipeline = PipelineBuilder.start(Order.class)
 ```
 
 All three methods have default no-op implementations on the interface, so you only override what you need. Exceptions thrown by hook callbacks are caught and logged as `lifecycle.hook_failed` warnings — they never affect the pipeline result.
+
+If `onStart` throws, execution halts immediately (no steps run) and the pipeline returns a `Failure` with `failedStepId="pipeline.onStart"`. `onFinish` and `onError` are still called with that failure so clean-up and alerting hooks always fire.
 
 Hooks fire at the **top-level pipeline boundary only**. Sub-pipelines used inside `.branch()` arms or as steps via `.asStep()` do not re-fire the parent pipeline's hooks.
 

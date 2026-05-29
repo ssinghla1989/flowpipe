@@ -172,6 +172,42 @@ class PipelineDeadlineTest {
     }
 
     @Test
+    void deadline_enforced_while_waiting_for_concurrent_foreach_window() {
+        // A concurrent foreach window where one item sleeps well past the deadline.
+        // Without the fix, future.get() had no timeout and would block indefinitely.
+        Step<String, String> slowItem = Step.of("item", String.class, String.class, (s, ctx) -> {
+            if ("item-0".equals(s)) sleepUninterruptibly(500);
+            return s;
+        });
+
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        Step<String, List<String>> toList = (Step) Step.of("to-list", String.class, List.class,
+            (s, ctx) -> List.of("item-0", "item-1"));
+
+        java.util.concurrent.ExecutorService exec = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            @SuppressWarnings({"unchecked", "rawtypes"})
+            Pipeline<String, ?> pipeline = (Pipeline<String, ?>) (Pipeline) PipelineBuilder.start(String.class)
+                .then(toList)
+                .foreach(slowItem, 2)
+                .withExecutor(exec)
+                .withDeadline(50)
+                .build();
+
+            long start = System.currentTimeMillis();
+            Result<?> result = pipeline.execute("x");
+            long elapsed = System.currentTimeMillis() - start;
+
+            assertThat(result).isInstanceOf(Failure.class);
+            assertThat(((Failure<?>) result).cause()).isInstanceOf(PipelineDeadlineExceededException.class);
+            assertThat(((Failure<?>) result).failedStepId()).isEqualTo("pipeline.deadline");
+            assertThat(elapsed).isLessThan(400);
+        } finally {
+            exec.shutdown();
+        }
+    }
+
+    @Test
     void no_deadline_by_default() {
         Step<String, String> step = Step.of("step", String.class, String.class, (s, ctx) -> {
             sleepUninterruptibly(30);

@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class StepExecutionTest {
 
@@ -66,15 +67,14 @@ class StepExecutionTest {
     }
 
     @Test
-    void noop_validator_defaults_allow_null_and_any_value() {
-        Step<String, String> nullable = Step.of("nullable", String.class, String.class,
-            (s, ctx) -> null);
+    void noop_validator_accepts_any_non_null_value_including_empty_string() {
+        Step<String, String> passThrough = Step.of("pass", String.class, String.class,
+            (s, ctx) -> s.isEmpty() ? "empty" : s);
 
-        Pipeline<String, String> pipeline = PipelineBuilder.start(String.class).then(nullable).build();
-        Result<String> result = pipeline.execute("hello");
+        Pipeline<String, String> pipeline = PipelineBuilder.start(String.class).then(passThrough).build();
 
-        assertThat(result).isInstanceOf(Success.class);
-        assertThat(((Success<String>) result).value()).isNull();
+        assertThat(pipeline.execute("hello")).isInstanceOf(Success.class);
+        assertThat(((Success<String>) pipeline.execute("")).value()).isEqualTo("empty");
     }
 
     @Test
@@ -90,6 +90,21 @@ class StepExecutionTest {
         Failure<String> failure = (Failure<String>) result;
         assertThat(failure.failedStepId()).isEqualTo("bad");
         assertThat(failure.cause()).isSameAs(boom);
+    }
+
+    @Test
+    void execute_with_null_input_throws_before_any_step_runs() {
+        AtomicBoolean stepRan = new AtomicBoolean(false);
+        Step<String, String> step = Step.of("s", String.class, String.class, (s, ctx) -> {
+            stepRan.set(true);
+            return s;
+        });
+        Pipeline<String, String> pipeline = PipelineBuilder.start(String.class).then(step).build();
+
+        assertThatThrownBy(() -> pipeline.execute(null))
+            .isInstanceOf(NullPointerException.class)
+            .hasMessageContaining("input");
+        assertThat(stepRan.get()).isFalse();
     }
 
     @Test
