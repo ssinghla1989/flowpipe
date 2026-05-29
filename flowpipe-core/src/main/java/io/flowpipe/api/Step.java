@@ -47,6 +47,10 @@ public interface Step<I, O> {
         };
     }
 
+    static <I, O> StepBuilder<I, O> builder(String id, Class<I> inputType, Class<O> outputType) {
+        return new StepBuilder<>(id, inputType, outputType);
+    }
+
     static <I, O> Step<I, O> of(String id,
                                 Class<I> inputType,
                                 Class<O> outputType,

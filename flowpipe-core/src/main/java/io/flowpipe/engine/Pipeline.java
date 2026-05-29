@@ -108,6 +108,14 @@ public final class Pipeline<I, O> {
      *           that pipeline
      * @return a {@link Step} that delegates {@code execute()} to this pipeline
      */
+    /**
+     * Convenience alias for {@link PipelineBuilder#start(Class)} — discoverable entry point when
+     * starting from the {@code Pipeline} class rather than {@code PipelineBuilder}.
+     */
+    public static <I> PipelineBuilder<I, I> builder(Class<I> inputType) {
+        return PipelineBuilder.start(inputType);
+    }
+
     public Step<I, O> asStep(String id) {
         Objects.requireNonNull(id, "id");
         Pipeline<I, O> self = this;
