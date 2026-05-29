@@ -7,6 +7,9 @@ dependencies {
     runtimeOnly("io.jsonwebtoken:jjwt-impl:0.12.6")
     runtimeOnly("io.jsonwebtoken:jjwt-jackson:0.12.6")
 
+    // gorules zen-engine — api scope because JsonBuffer appears in ZenDecisionStep's I/O types
+    api("io.gorules:zen-engine:0.7.2")
+
     testImplementation(project(":flowpipe-test"))
     testRuntimeOnly("ch.qos.logback:logback-classic:1.5.6")
 }

@@ -1,0 +1,41 @@
+{
+  "nodes": [
+    {
+      "id": "input1",
+      "type": "inputNode",
+      "position": {"x": 150, "y": 210},
+      "name": "Request"
+    },
+    {
+      "id": "dt1",
+      "type": "decisionTableNode",
+      "position": {"x": 410, "y": 210},
+      "name": "Eligibility",
+      "content": {
+        "hitPolicy": "first",
+        "inputs": [
+          {"field": "score", "id": "col-score", "name": "Score", "type": "expression"}
+        ],
+        "outputs": [
+          {"field": "eligible", "id": "col-eligible", "name": "Eligible", "type": "expression"},
+          {"field": "tier",     "id": "col-tier",     "name": "Tier",     "type": "expression"}
+        ],
+        "rules": [
+          {"_id": "r1", "col-score": ">= 700", "col-eligible": "true",  "col-tier": "\"premium\""},
+          {"_id": "r2", "col-score": ">= 600", "col-eligible": "true",  "col-tier": "\"standard\""},
+          {"_id": "r3", "col-score": "< 600",  "col-eligible": "false", "col-tier": "\"rejected\""}
+        ]
+      }
+    },
+    {
+      "id": "output1",
+      "type": "outputNode",
+      "position": {"x": 660, "y": 210},
+      "name": "Response"
+    }
+  ],
+  "edges": [
+    {"id": "e1", "sourceId": "input1", "type": "edge", "targetId": "dt1"},
+    {"id": "e2", "sourceId": "dt1",    "type": "edge", "targetId": "output1"}
+  ]
+}
