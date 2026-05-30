@@ -1,0 +1,42 @@
+{
+  "nodes": [
+    {
+      "id": "input1",
+      "type": "inputNode",
+      "position": {"x": 150, "y": 210},
+      "name": "Request"
+    },
+    {
+      "id": "dt1",
+      "type": "decisionTableNode",
+      "position": {"x": 410, "y": 210},
+      "name": "Applicable Fees",
+      "content": {
+        "hitPolicy": "collect",
+        "inputs": [
+          {"field": "amount",   "id": "col-amount",   "name": "Amount",   "type": "expression"},
+          {"field": "priority", "id": "col-priority", "name": "Priority", "type": "expression"}
+        ],
+        "outputs": [
+          {"field": "fee",   "id": "col-fee",   "name": "Fee Amount", "type": "expression"},
+          {"field": "label", "id": "col-label", "name": "Fee Label",  "type": "expression"}
+        ],
+        "rules": [
+          {"_id": "r1", "col-amount": "",         "col-priority": "",              "col-fee": "10", "col-label": "\"processing\""},
+          {"_id": "r2", "col-amount": "> 10000",  "col-priority": "",              "col-fee": "50", "col-label": "\"high_value\""},
+          {"_id": "r3", "col-amount": "",         "col-priority": "\"express\"",   "col-fee": "25", "col-label": "\"express\""}
+        ]
+      }
+    },
+    {
+      "id": "output1",
+      "type": "outputNode",
+      "position": {"x": 660, "y": 210},
+      "name": "Response"
+    }
+  ],
+  "edges": [
+    {"id": "e1", "sourceId": "input1", "type": "edge", "targetId": "dt1"},
+    {"id": "e2", "sourceId": "dt1",    "type": "edge", "targetId": "output1"}
+  ]
+}

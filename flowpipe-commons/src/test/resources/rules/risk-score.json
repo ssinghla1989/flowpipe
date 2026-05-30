@@ -1,0 +1,35 @@
+{
+  "nodes": [
+    {
+      "id": "input1",
+      "type": "inputNode",
+      "position": {"x": 150, "y": 210},
+      "name": "Input"
+    },
+    {
+      "id": "expr1",
+      "type": "expressionNode",
+      "position": {"x": 410, "y": 210},
+      "name": "Risk Score",
+      "content": {
+        "expressions": [
+          {
+            "id": "expr-score",
+            "key": "riskScore",
+            "value": "creditScore / 10 + (income / loanAmount) * 100"
+          }
+        ]
+      }
+    },
+    {
+      "id": "output1",
+      "type": "outputNode",
+      "position": {"x": 660, "y": 210},
+      "name": "Output"
+    }
+  ],
+  "edges": [
+    {"id": "e1", "sourceId": "input1", "type": "edge", "targetId": "expr1"},
+    {"id": "e2", "sourceId": "expr1",  "type": "edge", "targetId": "output1"}
+  ]
+}
