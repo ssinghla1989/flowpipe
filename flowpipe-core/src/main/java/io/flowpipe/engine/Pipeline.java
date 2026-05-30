@@ -515,6 +515,12 @@ public final class Pipeline<I, O> {
                 return new ForeachFailure(new Failure<>(
                     new PipelineDeadlineExceededException(deadlineMs), "pipeline.deadline", traceBuilder.build()));
             }
+            if (items.get(i) == null) {
+                String itemLabel = stepId + "[" + i + "]";
+                return new ForeachFailure(new Failure<>(
+                    new NullPointerException("foreach item at index " + i + " is null; list elements must not be null"),
+                    itemLabel, traceBuilder.build()));
+            }
             String itemLabel = stepId + "[" + i + "]";
             ItemResult result = executeItemWithRetry(fn.step(), items.get(i), itemLabel, ctx, context, recorder, spanRecorder);
             traceBuilder.append(result.trace());

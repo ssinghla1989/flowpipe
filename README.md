@@ -73,7 +73,7 @@ When you need retry, timeout, circuit breaker, or validation policies, chain the
 ```java
 Step<String, UserProfile> fetchProfile = Step.builder("fetch-profile", String.class, UserProfile.class)
     .execute((userId, ctx) -> profileService.fetch(userId))
-    .withRetry(RetryPolicy.exponential(3, 100, 2.0, true))
+    .withRetry(RetryPolicy.exponential(3, 100, 30_000, 2.0, true))
     .withTimeout(TimeoutPolicy.ofMillis(500))
     .withCircuitBreaker(CircuitBreakerPolicy.defaults())
     .withInputValidator(input -> {
@@ -469,7 +469,7 @@ By default a `RetryPolicy` retries on any exception. Use `.retryOn(predicate)` t
 import java.io.IOException;
 import java.net.SocketTimeoutException;
 
-RetryPolicy policy = RetryPolicy.exponential(3, 100, 2.0, false)
+RetryPolicy policy = RetryPolicy.exponential(3, 100, 30_000, 2.0, false)
     .retryOn(e -> e instanceof IOException);  // only retry I/O failures
 
 // Combine multiple types:
@@ -836,6 +836,63 @@ Step<String, String> throwing  = Steps.throwing("bad-step", String.class, new Ru
 Step<String, Void>   noop      = Steps.noop("side-effect-only");
 Step<String, List<String>> split = Steps.split("split", ",");
 ```
+
+---
+
+## Deployment
+
+### Pipeline lifecycle
+
+`Pipeline` instances are thread-safe and intended to be singletons — build once, reuse across every request. `pipeline.build()` is pure in-memory wiring (type checking, state machine setup) and takes under 1 ms even for large pipelines. The cost to avoid is rebuilding on every request, which resets circuit breaker state and pays build-time validation overhead repeatedly.
+
+**Long-lived services (EC2, ECS, Kubernetes):** construct the pipeline after your DI container is ready, before accepting traffic:
+
+```java
+@Component
+public class OrderPipeline {
+    private Pipeline<Order, OrderResult> pipeline;
+
+    @PostConstruct
+    void init() {
+        this.pipeline = PipelineBuilder.start(Order.class)
+            .then(validateStep)
+            .then(chargeStep)
+            .build();
+    }
+
+    public Result<OrderResult> execute(Order order) {
+        return pipeline.execute(order);
+    }
+}
+```
+
+**AWS Lambda:** use the initialization-on-demand holder pattern so class loading is not delayed at startup, but the pipeline is still built only once per execution environment:
+
+```java
+public class MyHandler implements RequestHandler<Input, Output> {
+
+    private static final class Holder {
+        static final Pipeline<Input, Output> PIPELINE = PipelineBuilder
+            .start(Input.class)
+            .then(validateStep)
+            .then(chargeStep)
+            .build();
+    }
+
+    @Override
+    public Output handleRequest(Input input, Context context) {
+        Result<Output> result = Holder.PIPELINE.execute(input);
+        if (result instanceof Success<Output> s) return s.value();
+        throw new RuntimeException(((Failure<Output>) result).cause());
+    }
+}
+```
+
+The inner class is not loaded until `Holder.PIPELINE` is first accessed — the first request pays the build cost, warm invocations reuse the same instance with circuit breaker state intact. On cold start, circuit breaker state resets, which is acceptable since the downstream services were also restarting.
+
+### Parallel branch cancellation
+
+When one branch of a `parallel` block fails, the remaining in-flight branches receive `Future.cancel(true)`. This delivers a thread interrupt to the branch's execution thread. If a step body is blocked on I/O that does not check the interrupt flag (e.g. a legacy JDBC call), the thread continues running until the I/O completes — the pipeline result is already a `Failure` and the branch output is discarded, but the thread is not forcibly terminated. Use interruptible I/O or set conservative per-step `TimeoutPolicy` deadlines to bound runaway branches.
 
 ---
 

@@ -155,6 +155,23 @@ class ForeachExecutionTest {
             .hasMessageContaining("dup");
     }
 
+    @Test
+    void null_item_in_list_surfaces_as_failure_with_index() {
+        Pipeline<List<String>, List<String>> p = listPipeline(upper("up"));
+        List<String> withNull = new java.util.ArrayList<>();
+        withNull.add("a");
+        withNull.add(null);
+        withNull.add("c");
+
+        Result<List<String>> r = p.execute(withNull);
+
+        assertThat(r).isInstanceOf(Failure.class);
+        Failure<List<String>> f = (Failure<List<String>>) r;
+        assertThat(f.cause()).isInstanceOf(NullPointerException.class);
+        assertThat(f.cause().getMessage()).contains("index 1");
+        assertThat(f.failedStepId()).isEqualTo("up[1]");
+    }
+
     // ── 6.4 Composition ───────────────────────────────────────────────────────
 
     @Test
