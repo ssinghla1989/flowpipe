@@ -32,7 +32,7 @@ import java.util.Objects;
  * var validateJwt = JwtValidationStep.asymmetric("auth.validate-jwt", publicKey);
  *
  * // Reading claims downstream via state
- * var pipeline = Pipeline.builder(String.class, OrderResponse.class)
+ * var pipeline = Pipeline.builder(String.class)
  *     .then(validateJwt.withOutputKey(SecurityStateKeys.JWT_CLAIMS))
  *     .then(orderStep)
  *     .build();

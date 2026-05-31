@@ -10,7 +10,8 @@ import java.util.List;
  */
 public final class TestMetricsRecorder implements MetricsRecorder {
 
-    public sealed interface Event permits DurationEvent, AttemptsEvent, OutcomeEvent, RetryAttemptEvent {
+    public sealed interface Event permits DurationEvent, AttemptsEvent, OutcomeEvent,
+        RetryAttemptEvent, PipelineDurationEvent, PipelineOutcomeEvent {
         String stepId();
     }
 
@@ -21,6 +22,14 @@ public final class TestMetricsRecorder implements MetricsRecorder {
     public record OutcomeEvent(String stepId, StepOutcome outcome) implements Event {}
 
     public record RetryAttemptEvent(String stepId, int attemptNumber) implements Event {}
+
+    public record PipelineDurationEvent(long durationNanos, StepOutcome outcome) implements Event {
+        @Override public String stepId() { return "pipeline"; }
+    }
+
+    public record PipelineOutcomeEvent(StepOutcome outcome) implements Event {
+        @Override public String stepId() { return "pipeline"; }
+    }
 
     private final List<Event> events = new ArrayList<>();
 
@@ -42,6 +51,16 @@ public final class TestMetricsRecorder implements MetricsRecorder {
     @Override
     public synchronized void recordRetryAttempt(String stepId, int attemptNumber) {
         events.add(new RetryAttemptEvent(stepId, attemptNumber));
+    }
+
+    @Override
+    public synchronized void recordPipelineDuration(long durationNanos, StepOutcome outcome) {
+        events.add(new PipelineDurationEvent(durationNanos, outcome));
+    }
+
+    @Override
+    public synchronized void recordPipelineOutcome(StepOutcome outcome) {
+        events.add(new PipelineOutcomeEvent(outcome));
     }
 
     public synchronized List<Event> events() {

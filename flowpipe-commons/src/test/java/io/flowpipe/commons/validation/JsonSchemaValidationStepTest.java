@@ -1,5 +1,6 @@
 package io.flowpipe.commons.validation;
 
+import com.networknt.schema.SpecVersion;
 import io.flowpipe.api.Failure;
 import io.flowpipe.api.Result;
 import io.flowpipe.api.Success;
@@ -148,6 +149,35 @@ class JsonSchemaValidationStepTest {
 
         assertThat(step.describe().retryPolicy().maxAttempts()).isEqualTo(3);
         assertThat(step.describe().timeoutPolicy().timeoutMs()).isEqualTo(200);
+    }
+
+    // --- spec version ---
+
+    private static final String DRAFT_2020_12_SCHEMA = """
+            {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "required": ["name"],
+              "properties": { "name": { "type": "string" } }
+            }
+            """;
+
+    @Test
+    void loadsSchemaUsingDraft2020_12() {
+        var step = JsonSchemaValidationStep.fromContent(
+            "validate.name", DRAFT_2020_12_SCHEMA, SpecVersion.VersionFlag.V202012);
+        var pipeline = Pipeline.builder(String.class).then(step).build();
+
+        Result<String> ok = pipeline.execute("{\"name\":\"ada\"}", RequestContext.empty());
+        assertThat(ok).isInstanceOf(Success.class);
+
+        Result<String> bad = pipeline.execute("{}", RequestContext.empty());
+        assertThat(bad).isInstanceOf(Failure.class);
+    }
+
+    @Test
+    void defaultSpecVersionIsDraft07() {
+        assertThat(JsonSchemaValidationStep.DEFAULT_SPEC_VERSION).isEqualTo(SpecVersion.VersionFlag.V7);
     }
 
     // --- usable as first step in request-validation pipeline ---

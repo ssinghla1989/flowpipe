@@ -13,9 +13,12 @@ import org.junit.jupiter.api.Test;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpRequest;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class HttpCallStepTest {
 
@@ -129,6 +132,63 @@ class HttpCallStepTest {
 
         assertThat(result).isInstanceOf(Failure.class);
         assertThat(((Failure<String>) result).cause()).isNotInstanceOf(HttpCallException.class);
+    }
+
+    // --- request timeout fallback ---
+
+    @Test
+    void fallbackRequestTimeoutAppliesWhenRequestHasNone() throws Exception {
+        // Server delays response longer than the fallback timeout -> JDK throws HttpTimeoutException.
+        server.createContext("/slow", exchange -> {
+            try { Thread.sleep(500); } catch (InterruptedException ignored) {}
+            exchange.sendResponseHeaders(200, 0);
+            exchange.close();
+        });
+
+        var step = new HttpCallStep("call.api", Duration.ofMillis(100));
+        var pipeline = Pipeline.builder(HttpRequest.class).then(step).build();
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/slow"))
+                .GET().build();
+
+        Result<String> result = pipeline.execute(request, RequestContext.empty());
+
+        assertThat(result).isInstanceOf(Failure.class);
+        assertThat(((Failure<String>) result).cause()).isInstanceOf(HttpTimeoutException.class);
+    }
+
+    @Test
+    void requestSuppliedTimeoutWinsOverFallback() throws Exception {
+        // Caller-set timeout is generous; fallback would have fired earlier but is ignored.
+        server.createContext("/short-delay", exchange -> {
+            try { Thread.sleep(150); } catch (InterruptedException ignored) {}
+            byte[] body = "ok".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+
+        var step = new HttpCallStep("call.api", Duration.ofMillis(50));
+        var pipeline = Pipeline.builder(HttpRequest.class).then(step).build();
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/short-delay"))
+                .timeout(Duration.ofSeconds(2))
+                .GET().build();
+
+        Result<String> result = pipeline.execute(request, RequestContext.empty());
+
+        assertThat(result).isInstanceOf(Success.class);
+        assertThat(((Success<String>) result).value()).isEqualTo("ok");
+    }
+
+    @Test
+    void rejectsZeroOrNegativeFallbackTimeout() {
+        assertThatThrownBy(() -> new HttpCallStep("call.api", Duration.ZERO))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new HttpCallStep("call.api", Duration.ofMillis(-1)))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     // --- policy overrides (inherited from Step) ---

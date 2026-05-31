@@ -134,10 +134,12 @@ public final class Pipeline<I, O> {
         DefaultStepContext ctx = new DefaultStepContext(state, context);
         ExecutionTrace.Builder traceBuilder = ExecutionTrace.builder();
 
+        long pipelineStartNanos = System.nanoTime();
         try {
             lifecycle.onStart(input, ctx);
         } catch (Throwable t) {
             Failure<O> failure = new Failure<>(t, "pipeline.onStart", traceBuilder.build());
+            emitPipelineMetrics(recorder, System.nanoTime() - pipelineStartNanos, StepOutcome.FAILURE);
             safeLifecycleCall("onFinish", () -> lifecycle.onFinish(failure, ctx));
             safeLifecycleCall("onError", () -> lifecycle.onError(failure, ctx));
             return failure;
@@ -150,12 +152,22 @@ public final class Pipeline<I, O> {
         @SuppressWarnings("unchecked")
         Result<O> result = (Result<O>) executeShared(input, ctx, context, recorder, spanRecorder, traceBuilder, deadlineNs);
 
+        StepOutcome pipelineOutcome = (result instanceof Success<O>) ? StepOutcome.SUCCESS : StepOutcome.FAILURE;
+        emitPipelineMetrics(recorder, System.nanoTime() - pipelineStartNanos, pipelineOutcome);
+
         safeLifecycleCall("onFinish", () -> lifecycle.onFinish(result, ctx));
         if (result instanceof Failure<O> failure) {
             safeLifecycleCall("onError", () -> lifecycle.onError(failure, ctx));
         }
 
         return result;
+    }
+
+    private static void emitPipelineMetrics(MetricsRecorder recorder, long durationNanos, StepOutcome outcome) {
+        safeRecord("pipeline", "recordPipelineDuration",
+            () -> recorder.recordPipelineDuration(durationNanos, outcome));
+        safeRecord("pipeline", "recordPipelineOutcome",
+            () -> recorder.recordPipelineOutcome(outcome));
     }
 
     private static void safeLifecycleCall(String op, RunnableEx call) {

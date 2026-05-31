@@ -14,7 +14,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiFunction;
 import java.util.function.BiPredicate;
@@ -386,10 +386,18 @@ public final class PipelineBuilder<I, O> {
         ensureUsable();
         consumed = true;
         validate();
-        ExecutorService resolved = (executor != null) ? executor : ForkJoinPool.commonPool();
+        ExecutorService resolved = (executor != null) ? executor : DefaultExecutorHolder.INSTANCE;
         var circuitBreakers = buildCircuitBreakers(nodes);
         return new Pipeline<>(inputType, currentOutputType, List.copyOf(nodes), metricsRecorder,
             spanRecorder, resolved, lifecycle, circuitBreakers, deadlineMs);
+    }
+
+    // Lazy holder so the executor is created only when a pipeline that omits .withExecutor(...)
+    // is actually built. Virtual threads (Java 21) give parallel composition unlimited
+    // concurrency without pinning platform threads, and unlike ForkJoinPool.commonPool() the
+    // pool is FlowPipe-private — it cannot starve unrelated CommonPool workloads on the JVM.
+    private static final class DefaultExecutorHolder {
+        static final ExecutorService INSTANCE = Executors.newVirtualThreadPerTaskExecutor();
     }
 
     private static java.util.Map<String, dev.failsafe.CircuitBreaker<Object>> buildCircuitBreakers(

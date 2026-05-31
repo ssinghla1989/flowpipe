@@ -9,6 +9,8 @@ import io.flowpipe.observability.TestMetricsRecorder.AttemptsEvent;
 import io.flowpipe.observability.TestMetricsRecorder.DurationEvent;
 import io.flowpipe.observability.TestMetricsRecorder.Event;
 import io.flowpipe.observability.TestMetricsRecorder.OutcomeEvent;
+import io.flowpipe.observability.TestMetricsRecorder.PipelineDurationEvent;
+import io.flowpipe.observability.TestMetricsRecorder.PipelineOutcomeEvent;
 import io.flowpipe.state.RequestContext;
 import org.junit.jupiter.api.Test;
 
@@ -26,6 +28,10 @@ class StepMetricsTest {
         // assertion: no exception
     }
 
+    // Each execute emits 5 events: 3 per-step (duration, attempts, outcome) + 2 pipeline-level
+    // (pipeline duration, pipeline outcome). See pipeline_metrics_emit_* tests below.
+    private static final int EVENTS_PER_EXECUTE = 5;
+
     @Test
     void builder_default_is_no_op_when_with_metrics_not_called() {
         Step<String, String> s = Step.builder("s", String.class, String.class).execute((in, ctx) -> in).build();
@@ -33,7 +39,7 @@ class StepMetricsTest {
 
         TestMetricsRecorder override = new TestMetricsRecorder();
         defaulted.execute("x", RequestContext.empty(), override);
-        assertThat(override.events()).hasSize(3);
+        assertThat(override.events()).hasSize(EVENTS_PER_EXECUTE);
 
         override.clear();
         defaulted.execute("x");
@@ -54,7 +60,7 @@ class StepMetricsTest {
         pipeline.execute("x");
 
         assertThat(a.events()).isEmpty();
-        assertThat(b.events()).hasSize(3);
+        assertThat(b.events()).hasSize(EVENTS_PER_EXECUTE);
     }
 
     @Test
@@ -69,12 +75,12 @@ class StepMetricsTest {
             .build();
 
         pipeline.execute("x", RequestContext.empty(), override);
-        assertThat(override.events()).hasSize(3);
+        assertThat(override.events()).hasSize(EVENTS_PER_EXECUTE);
         assertThat(defaultRec.events()).isEmpty();
 
         pipeline.execute("y");
-        assertThat(override.events()).hasSize(3);
-        assertThat(defaultRec.events()).hasSize(3);
+        assertThat(override.events()).hasSize(EVENTS_PER_EXECUTE);
+        assertThat(defaultRec.events()).hasSize(EVENTS_PER_EXECUTE);
     }
 
     @Test
@@ -120,6 +126,48 @@ class StepMetricsTest {
         assertThat(rec.events("bad")).filteredOn(e -> e instanceof AttemptsEvent)
             .extracting(e -> ((AttemptsEvent) e).attempts())
             .containsExactly(1);
+    }
+
+    @Test
+    void pipeline_metrics_emit_one_duration_and_one_outcome_per_execute_on_success() {
+        TestMetricsRecorder rec = new TestMetricsRecorder();
+        Step<String, String> s = Step.builder("s", String.class, String.class).execute((in, ctx) -> in).build();
+
+        Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
+            .then(s)
+            .withMetrics(rec)
+            .build();
+        pipeline.execute("x");
+
+        assertThat(rec.events()).filteredOn(e -> e instanceof PipelineDurationEvent)
+            .extracting(e -> ((PipelineDurationEvent) e).outcome())
+            .containsExactly(StepOutcome.SUCCESS);
+        assertThat(rec.events()).filteredOn(e -> e instanceof PipelineDurationEvent)
+            .extracting(e -> ((PipelineDurationEvent) e).durationNanos())
+            .allMatch(d -> d > 0L);
+        assertThat(rec.events()).filteredOn(e -> e instanceof PipelineOutcomeEvent)
+            .extracting(e -> ((PipelineOutcomeEvent) e).outcome())
+            .containsExactly(StepOutcome.SUCCESS);
+    }
+
+    @Test
+    void pipeline_metrics_record_failure_outcome_when_a_step_fails() {
+        TestMetricsRecorder rec = new TestMetricsRecorder();
+        Step<String, String> bad = Step.builder("bad", String.class, String.class)
+            .execute((in, ctx) -> { throw new RuntimeException("boom"); }).build();
+
+        Pipeline<String, String> pipeline = PipelineBuilder.start(String.class)
+            .then(bad)
+            .withMetrics(rec)
+            .build();
+        pipeline.execute("x");
+
+        assertThat(rec.events()).filteredOn(e -> e instanceof PipelineDurationEvent)
+            .extracting(e -> ((PipelineDurationEvent) e).outcome())
+            .containsExactly(StepOutcome.FAILURE);
+        assertThat(rec.events()).filteredOn(e -> e instanceof PipelineOutcomeEvent)
+            .extracting(e -> ((PipelineOutcomeEvent) e).outcome())
+            .containsExactly(StepOutcome.FAILURE);
     }
 
     @Test
